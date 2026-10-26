@@ -20,6 +20,9 @@ import 'topic_filter.dart';
 /// It supports `+`/`#` filters, retained messages and last wills. Use
 /// [stop] and [start] to test what happens when the broker goes away.
 class MemoryBroker {
+  /// Creates a running broker with no clients and no retained messages.
+  MemoryBroker();
+
   final Set<MemoryTransport> _clients = {};
   final Map<String, RawMessage> _retained = {};
   bool _running = true;
@@ -64,7 +67,20 @@ class MemoryBroker {
 }
 
 /// An [MqttTransport] connected to a [MemoryBroker].
+///
+/// Pass it to a client in tests:
+///
+/// ```dart
+/// final client = BedayaClient(
+///   ClientConfig(host: 'memory'), // host is not used
+///   transport: MemoryTransport(broker),
+/// );
+/// ```
+///
+/// Like a real connection, it forgets its subscriptions when it drops; the
+/// client restores them.
 class MemoryTransport implements MqttTransport {
+  /// Creates a transport for [broker]. It connects on `connect()`.
   MemoryTransport(this.broker);
 
   /// The broker this transport connects to.

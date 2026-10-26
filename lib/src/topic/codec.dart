@@ -5,7 +5,20 @@ import '../errors.dart';
 /// Turns a value of type [T] into bytes and back.
 ///
 /// MQTT payloads are raw bytes. A codec lets the rest of the package work
-/// with typed messages instead.
+/// with typed messages instead. Most topics use [JsonMessageCodec] (through
+/// `Topic.json`). Write your own for other formats:
+///
+/// ```dart
+/// class TextCodec implements MessageCodec<String> {
+///   const TextCodec();
+///   @override
+///   List<int> encode(String value) => utf8.encode(value);
+///   @override
+///   String decode(List<int> bytes) => utf8.decode(bytes);
+/// }
+///
+/// final log = Topic<String>('{deviceId}/log', codec: const TextCodec());
+/// ```
 abstract interface class MessageCodec<T> {
   /// Converts [value] into payload bytes.
   List<int> encode(T value);
@@ -17,7 +30,12 @@ abstract interface class MessageCodec<T> {
 }
 
 /// A [MessageCodec] that sends [T] as a UTF-8 JSON object.
+///
+/// Encoding: `toJson(value)` → `jsonEncode` → UTF-8 bytes.
+/// Decoding: UTF-8 bytes → `jsonDecode` → must be an object → `fromJson`.
+/// Any failure while decoding becomes a [DecodeException].
 class JsonMessageCodec<T> implements MessageCodec<T> {
+  /// Creates a codec from your message's [fromJson] and [toJson].
   const JsonMessageCodec({required this.fromJson, required this.toJson});
 
   /// Builds a [T] from a decoded JSON object.

@@ -16,7 +16,11 @@ import '../topic/topic.dart';
 /// me.commands.listen((c) => me.ack(c));
 /// await me.publish(BedayaTopics.telemetry, Telemetry({'temp': 24.5}));
 /// ```
+///
+/// Always answer every command with [ack], even when it fails, or the
+/// controller waits until its timeout.
 class DeviceEndpoint {
+  /// Use `client.asDevice(id)` instead.
   DeviceEndpoint(this._client, this.id);
 
   final BedayaClient _client;
@@ -32,7 +36,8 @@ class DeviceEndpoint {
   Future<void> publish<T>(Topic<T> topic, T value) =>
       _client.publish(topic, value, params: _params);
 
-  /// Commands sent to this device.
+  /// Commands sent to this device. With QoS 1 a command can arrive twice;
+  /// compare [Command.id] if running it twice would be a problem.
   Stream<Command> get commands => _client
       .subscribe(BedayaTopics.command, params: _params)
       .map((m) => m.value);

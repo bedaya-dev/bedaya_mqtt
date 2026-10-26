@@ -218,6 +218,31 @@ client.devices.changes.listen((all) {
 });
 ```
 
+## Tracing and debugging
+
+Pass a `logger` to see every step the client takes. `print` works:
+
+```dart
+BedayaClient(ClientConfig(host: 'broker.hivemq.com', logger: print));
+```
+
+```text
+12:00:01.204 [info] connecting to broker.hivemq.com
+12:00:01.391 [info] connected
+12:00:01.392 [debug] subscribe bedaya/+/telemetry (atMostOnce)
+12:00:03.410 [debug] received bedaya/a1/telemetry {"temp":24.5}
+12:00:09.001 [warning] connection lost
+12:00:09.002 [info] reconnect #1 in 0:00:01.000000
+```
+
+Each `BedayaLogRecord` has a `level` (`debug`, `info`, `warning`, `error`),
+a `message`, the `error` behind it, and a `time`, so you can filter or send
+records to your own logging. Off by default.
+
+To understand the code itself, [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md)
+follows each operation (connect, publish, receive, reconnect, commands)
+through the files, and lists where to look for common problems.
+
 ## Errors
 
 | Where | What |

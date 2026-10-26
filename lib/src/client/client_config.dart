@@ -1,7 +1,10 @@
 import '../reconnect/backoff.dart';
+import 'bedaya_log.dart';
 
 /// How to reach the broker, and how the client behaves.
 class ClientConfig {
+  /// Only [host] is required. Everything else has a default that works
+  /// with most brokers.
   const ClientConfig({
     required this.host,
     this.port,
@@ -20,6 +23,7 @@ class ClientConfig {
     this.retryFirstConnect = false,
     this.maxQueueSize = 100,
     this.queueTtl,
+    this.logger,
   });
 
   /// The broker's host name, like `broker.hivemq.com`.
@@ -38,7 +42,10 @@ class ClientConfig {
   /// Two connections with the same id kick each other off the broker.
   final String? clientId;
 
+  /// The username, for brokers that require a login.
   final String? username;
+
+  /// The password that goes with [username].
   final String? password;
 
   /// Encrypts the connection with TLS.
@@ -103,4 +110,26 @@ class ClientConfig {
   /// Queued messages older than this are dropped instead of sent. `null`
   /// keeps them until they are sent or pushed out.
   final Duration? queueTtl;
+
+  /// Receives a [BedayaLogRecord] for every step the client takes:
+  /// connecting, subscribing, each message in and out, the queue, and
+  /// reconnects. `null` (the default) turns tracing off.
+  ///
+  /// The quickest way to see everything:
+  ///
+  /// ```dart
+  /// ClientConfig(host: 'broker.hivemq.com', logger: print)
+  /// ```
+  ///
+  /// Or keep only the important lines:
+  ///
+  /// ```dart
+  /// logger: (r) {
+  ///   if (r.level.index >= BedayaLogLevel.info.index) print(r);
+  /// }
+  /// ```
+  ///
+  /// Debug lines include the first characters of each payload, so think
+  /// twice before sending them to a remote log service.
+  final BedayaLogger? logger;
 }

@@ -2,7 +2,19 @@ import 'qos.dart';
 import 'raw_message.dart';
 
 /// Whether a transport is connected to the broker.
-enum TransportState { disconnected, connecting, connected }
+///
+/// Simpler than the client's `MqttConnectionState`: a transport has no
+/// idea of reconnecting or giving up. The client builds those on top.
+enum TransportState {
+  /// Not connected. The start, and after any disconnect or drop.
+  disconnected,
+
+  /// A connect is in progress.
+  connecting,
+
+  /// Connected; subscribe and publish work.
+  connected,
+}
 
 /// The connection to an MQTT broker, as the rest of the package sees it.
 ///

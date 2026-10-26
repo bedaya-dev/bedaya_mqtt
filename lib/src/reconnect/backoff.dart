@@ -7,8 +7,16 @@ import 'dart:math';
 /// that many devices don't all retry at the same moment after a broker
 /// restart.
 ///
-/// With the defaults: about 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
+/// With the defaults: about 1s, 2s, 4s, 8s, 16s, 30s, 30s, ... forever.
+///
+/// ```dart
+/// ClientConfig(
+///   host: 'broker.example.com',
+///   reconnect: ReconnectPolicy(maxDelay: Duration(minutes: 1), maxAttempts: 20),
+/// )
+/// ```
 class ReconnectPolicy {
+  /// Creates a policy. Every value has a sensible default.
   const ReconnectPolicy({
     this.initialDelay = const Duration(seconds: 1),
     this.maxDelay = const Duration(seconds: 30),

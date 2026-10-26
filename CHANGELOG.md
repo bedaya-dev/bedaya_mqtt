@@ -22,3 +22,7 @@ First release.
   breaking streams.
 - `package:bedaya_mqtt/testing.dart`: `MemoryBroker` and `MemoryTransport`
   for fast tests without a network.
+- Tracing: `ClientConfig.logger` receives a `BedayaLogRecord` for every
+  step (connect, subscribe, each message, queue, reconnect).
+- Every public API is documented, and `doc/ARCHITECTURE.md` explains how
+  the parts work together.

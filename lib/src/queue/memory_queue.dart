@@ -7,8 +7,12 @@ import 'queued_message.dart';
 /// A [MessageQueue] in memory. Bounded: when full, the oldest message is
 /// dropped, because for sensor data the newest is the most useful.
 ///
-/// Messages are lost if the app stops.
+/// Messages are lost if the app stops. The client makes one of these from
+/// `ClientConfig.maxQueueSize` and `ClientConfig.queueTtl`; you only need
+/// to create one yourself to pass a custom [clock] in tests.
 class MemoryQueue implements MessageQueue {
+  /// Creates a queue that holds up to [maxSize] messages, each for at most
+  /// [ttl]. [clock] replaces `DateTime.now` in tests.
   MemoryQueue({this.maxSize = 100, this.ttl, DateTime Function()? clock})
     : assert(maxSize > 0),
       _clock = clock ?? DateTime.now;

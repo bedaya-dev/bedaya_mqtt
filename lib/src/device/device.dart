@@ -10,9 +10,17 @@ import '../topic/topic.dart';
 
 /// A device seen from a controller: listen to it and send it commands.
 ///
-/// Get one with `client.device(id)`. It is cheap to create; it holds no
-/// subscriptions by itself.
+/// ```dart
+/// final device = client.device('a1');
+/// device.status.listen((s) => print(s.online));
+/// device.on(BedayaTopics.telemetry).listen((t) => print(t['temp']));
+/// final ack = await device.send(Command.relay(on: true));
+/// ```
+///
+/// It is cheap to create and holds no subscriptions by itself: each stream
+/// subscribes when you listen and unsubscribes when you cancel.
 class Device {
+  /// Use `client.device(id)` instead.
   Device(this._client, this.id);
 
   final BedayaClient _client;
@@ -35,9 +43,15 @@ class Device {
 
   /// Sends [command] and waits for the device's ack.
   ///
+  /// Step by step: listen on `{deviceId}/command/ack`, publish the command
+  /// on `{deviceId}/command`, wait for an ack with the same id, stop
+  /// listening.
+  ///
   /// Returns the ack even if it says the command failed; check
   /// [CommandAck.ok]. Throws a [CommandTimeoutException] if no ack arrives
-  /// within [timeout], and a [ConnectionException] if not connected.
+  /// within [timeout], and a [ConnectionException] if offline with the
+  /// queue turned off. (With the queue on, an offline command waits in the
+  /// queue, and the timeout keeps counting.)
   Future<CommandAck> send(
     Command command, {
     Duration timeout = const Duration(seconds: 10),

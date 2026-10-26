@@ -23,6 +23,9 @@ import 'topic_filter.dart';
 /// - The Last Will payload must be UTF-8 text.
 /// - Subscribing again to a filter at a higher QoS keeps the old QoS.
 class MqttClientTransport implements MqttTransport {
+  /// Wraps [_client], which must already have its server, port, client id
+  /// and TLS settings. `createTransport` builds one from `ClientConfig`.
+  /// [_username] and [_password] are sent when connecting.
   MqttClientTransport(this._client, {this._username, this._password}) {
     _client
       ..logging(on: false)

@@ -5,6 +5,7 @@ import 'qos.dart';
 /// This is what moves between the client and the transport. Typed messages
 /// only exist above this layer.
 class RawMessage {
+  /// Creates a message for the full [topic] with [payload] bytes.
   const RawMessage(
     this.topic,
     this.payload, {

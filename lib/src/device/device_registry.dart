@@ -6,8 +6,10 @@ import '../contract/bedaya_topics.dart';
 
 /// What the controller knows about one device.
 class DeviceInfo {
+  /// Creates the info. The registry does this; you only read them.
   const DeviceInfo({required this.id, required this.online, this.lastSeen});
 
+  /// The device id, like `a1`.
   final String id;
 
   /// From the device's status topic, or `true` once it sends anything live.
@@ -35,6 +37,8 @@ class DeviceInfo {
 /// });
 /// ```
 class DeviceRegistry {
+  /// Use `client.devices` instead. [clock] replaces `DateTime.now` in
+  /// tests.
   DeviceRegistry(BedayaClient client, {DateTime Function()? clock})
     : _clock = clock ?? DateTime.now {
     _subscriptions = [
