@@ -1,0 +1,15 @@
+# Files kept in the repository but left out of the pub.dev package.
+#
+# When this file exists, pub ignores .gitignore in this folder, so its
+# rules are repeated here.
+
+# From .gitignore
+.dart_tool/
+pubspec.lock
+
+# Notes for AI assistants working on the repo.
+CLAUDE.md
+
+# Local Mosquitto for integration tests (needs Docker), with generated
+# certificates and passwords.
+tool/

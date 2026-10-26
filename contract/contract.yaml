@@ -1,0 +1,103 @@
+# The Bedaya MQTT contract: the topics and payloads that boards (firmware)
+# and apps agree on.
+#
+# This file is a reference for firmware and docs. In version 0.x the Dart
+# side is written by hand in lib/src/contract/ and must match this file.
+# A generator may produce code from it later.
+
+version: 1
+
+# Every topic starts with the prefix, then the device id:
+#   {prefix}/{deviceId}/...
+# The prefix is configurable (ClientConfig.topicPrefix in Dart). The default
+# is "bedaya". Boards and apps must use the same one.
+prefix:
+  default: bedaya
+
+# Rules for {deviceId}: not empty, and no "/", "+" or "#".
+params:
+  deviceId:
+    description: Unique id of one board, like "a1" or a MAC address.
+
+# All payloads are UTF-8 JSON objects.
+topics:
+  telemetry:
+    pattern: "{prefix}/{deviceId}/telemetry"
+    direction: device -> controller
+    qos: 0
+    retained: false
+    description: >-
+      Sensor readings. A flat object; the keys are up to the device.
+      Values are numbers, strings, booleans, lists or objects.
+    payload:
+      type: object
+      additionalProperties: true
+    example: {"temp": 24.5, "humidity": 41, "relay": false}
+
+  status:
+    pattern: "{prefix}/{deviceId}/status"
+    direction: device -> controller
+    qos: 1
+    retained: true
+    description: >-
+      Whether the device is online. On connect the device publishes
+      {"online": true}, retained. It sets {"online": false} (retained,
+      QoS 1) as its MQTT Last Will, so the broker publishes it if the
+      device drops off. On a clean disconnect the device publishes
+      {"online": false} itself first.
+    payload:
+      type: object
+      required: [online]
+      properties:
+        online: {type: boolean}
+    example: {"online": true}
+
+  command:
+    pattern: "{prefix}/{deviceId}/command"
+    direction: controller -> device
+    qos: 1
+    retained: false
+    description: >-
+      An instruction for the device. "id" is unique per command and comes
+      back in the ack. With QoS 1 a command can arrive twice; devices may
+      ignore an id they have already handled.
+    payload:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string, description: "16 random hex characters"}
+        name: {type: string}
+        params: {type: object, description: "Left out when empty"}
+    example: {"id": "9f1c2a7b04de8361", "name": "relay", "params": {"on": true}}
+
+  commandAck:
+    pattern: "{prefix}/{deviceId}/command/ack"
+    direction: device -> controller
+    qos: 1
+    retained: false
+    description: >-
+      The device's answer to a command. "id" is the command's id. Send it
+      even when the command fails, with ok=false and an error, so the
+      controller doesn't wait until its timeout (10 s by default).
+    payload:
+      type: object
+      required: [id, ok]
+      properties:
+        id: {type: string}
+        ok: {type: boolean}
+        error: {type: string, description: "Only when ok is false"}
+    example: {"id": "9f1c2a7b04de8361", "ok": true}
+
+# Commands every Bedaya board understands.
+commands:
+  relay:
+    params:
+      on: {type: boolean}
+    example: {"id": "9f1c2a7b04de8361", "name": "relay", "params": {"on": true}}
+
+# Connection settings boards should use.
+connection:
+  protocol: MQTT 3.1.1
+  cleanSession: true
+  keepAliveSeconds: 30
+  clientId: unique per connection (two connections with one id kick each other off)
