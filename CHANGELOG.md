@@ -1,3 +1,9 @@
+## 0.1.2
+
+- pubspec description now starts with "Flutter & Dart", so the package
+  shows up when people search pub.dev for Flutter MQTT.
+- No changes to the library.
+
 ## 0.1.1
 
 - README: the quick start warns that `broker.hivemq.com` is shared by
