@@ -2,7 +2,7 @@ name: bedaya_mqtt
 description: >-
   Typed, reliable MQTT for Dart: auto reconnect, offline queue, typed topics,
   device and controller roles. Works in Flutter, CLI, servers and the web.
-version: 0.1.0
+version: 0.1.1
 repository: https://github.com/bedaya-dev/bedaya_mqtt
 issue_tracker: https://github.com/bedaya-dev/bedaya_mqtt/issues
 topics:

@@ -3,18 +3,18 @@
 //   dart run example/controller.dart [deviceId] [topicPrefix] [host[:port]]
 //
 // Start example/simulated_device.dart first, with the same id, prefix and
-// host.
+// host. The default prefix is bedaya-<your user name>, the same in both.
 
 import 'dart:async';
 import 'dart:io';
 
 import 'package:bedaya_mqtt/bedaya_mqtt.dart';
 
-import 'host_arg.dart';
+import 'cli_args.dart';
 
 Future<void> main(List<String> args) async {
   final deviceId = args.isNotEmpty ? args[0] : 'a1';
-  final prefix = args.length > 1 ? args[1] : 'bedaya';
+  final prefix = args.length > 1 ? args[1] : defaultPrefix();
   final (host, port) = hostAndPort(args.length > 2 ? args[2] : null);
 
   final client = BedayaClient(

@@ -2,9 +2,11 @@
 //
 //   dart run example/simulated_device.dart [deviceId] [topicPrefix] [host[:port]]
 //
-// Run example/controller.dart in another terminal to talk to it. The
-// default broker (broker.hivemq.com) is shared with everyone, so pick your
-// own prefix (like your name) to avoid seeing other people's devices.
+// Run example/controller.dart in another terminal to talk to it.
+//
+// The default broker (broker.hivemq.com) is shared with everyone, so the
+// default prefix is personal: bedaya-<your user name>. Both programs pick
+// the same one on your machine; strangers get a different one.
 // For a local broker: dart run example/simulated_device.dart a1 bedaya localhost:1883
 
 import 'dart:async';
@@ -13,11 +15,11 @@ import 'dart:math';
 
 import 'package:bedaya_mqtt/bedaya_mqtt.dart';
 
-import 'host_arg.dart';
+import 'cli_args.dart';
 
 Future<void> main(List<String> args) async {
   final deviceId = args.isNotEmpty ? args[0] : 'a1';
-  final prefix = args.length > 1 ? args[1] : 'bedaya';
+  final prefix = args.length > 1 ? args[1] : defaultPrefix();
   final (host, port) = hostAndPort(args.length > 2 ? args[2] : null);
 
   final client = BedayaClient(

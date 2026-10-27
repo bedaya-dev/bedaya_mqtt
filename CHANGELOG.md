@@ -1,3 +1,13 @@
+## 0.1.1
+
+- README: the quick start warns that `broker.hivemq.com` is shared by
+  everyone and uses a personal `topicPrefix`, so people trying it at the
+  same time don't see each other's devices.
+- `example/simulated_device.dart` and `example/controller.dart` default to
+  the prefix `bedaya-<your user name>` instead of `bedaya`.
+- README: "About Bedaya" now says Bedaya is a Flutter app, not hardware.
+- No changes to the library.
+
 ## 0.1.0
 
 First release.

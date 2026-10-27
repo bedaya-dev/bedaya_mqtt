@@ -30,12 +30,19 @@ dart pub add bedaya_mqtt
 
 ## Quick start
 
+These snippets use `broker.hivemq.com`, a free public broker that **everyone
+shares**. Pick your own `topicPrefix` (your name, or anything unique), and use
+the same one in the controller and the device. Otherwise you may see other
+people's devices, and they may switch your relay.
+
 ### Controller: watch a device and send it a command
 
 ```dart
 import 'package:bedaya_mqtt/bedaya_mqtt.dart';
 
-final client = BedayaClient(ClientConfig(host: 'broker.hivemq.com'));
+final client = BedayaClient(
+  ClientConfig(host: 'broker.hivemq.com', topicPrefix: 'bedaya-yourname'),
+);
 await client.connect();
 
 final device = client.device('a1');
@@ -49,7 +56,9 @@ print(ack.ok ? 'relay is on' : 'failed: ${ack.error}');
 ### Device: publish data and answer commands
 
 ```dart
-final client = BedayaClient(ClientConfig(host: 'broker.hivemq.com'));
+final client = BedayaClient(
+  ClientConfig(host: 'broker.hivemq.com', topicPrefix: 'bedaya-yourname'),
+);
 
 // Call asDevice before connect: it sets the Last Will, so the broker
 // reports the device offline if it drops off.
@@ -287,9 +296,9 @@ Use `transport.drop()` to simulate a lost connection, and
 
 ## About Bedaya
 
-Bedaya is an IoT kit: ESP boards and a Flutter app. This package is the free,
-open source part, and it works with any MQTT broker and any devices that
-follow the [contract](contract/contract.yaml).
+Bedaya is building a Flutter app for controlling ESP devices over MQTT. This
+package is the free, open source part, and it works with any MQTT broker and
+any devices that follow the [contract](contract/contract.yaml).
 
 ## License
 
