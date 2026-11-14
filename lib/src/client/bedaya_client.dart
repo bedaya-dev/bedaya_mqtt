@@ -126,6 +126,10 @@ class BedayaClient {
   /// for a dropped connection.
   bool _disconnecting = false;
 
+  /// True while the offline queue is being sent. New messages then wait
+  /// behind it, so nothing overtakes an older message.
+  bool _draining = false;
+
   /// The latest run of [_onConnected] after a reconnect, so the first
   /// connect can wait for it (see [_retryFirstConnect]).
   Future<void>? _restoring;
@@ -254,15 +258,29 @@ class BedayaClient {
         );
       }
 
-      final queue = _queue;
-      if (queue != null && queue.length > 0) {
-        _log(BedayaLogLevel.info, 'sending ${queue.length} queued messages');
-        await queue.drain(_transport.publish);
-      }
+      await _drainQueue();
     } on ConnectionException catch (e) {
       // Dropped again while restoring. _onTransportState starts another
       // round of retries, and what's left in the queue stays there.
       _log(BedayaLogLevel.warning, 'connection lost while restoring', e);
+    }
+  }
+
+  /// Sends the offline queue in order. Each QoS 1 or 2 message waits for
+  /// the broker's ack before the next one goes. Messages published
+  /// meanwhile join the end of the queue and are sent in the same run.
+  ///
+  /// Throws a [ConnectionException] if the connection drops; the message
+  /// being sent and the rest stay queued.
+  Future<void> _drainQueue() async {
+    final queue = _queue;
+    if (queue == null || _draining || queue.length == 0) return;
+    _draining = true;
+    try {
+      _log(BedayaLogLevel.info, 'sending ${queue.length} queued messages');
+      await queue.drain(_transport.publish);
+    } finally {
+      _draining = false;
     }
   }
 
@@ -287,7 +305,25 @@ class BedayaClient {
       final endpoint = _endpoint;
       if (endpoint != null) {
         _log(BedayaLogLevel.info, 'device "${endpoint.id}" is offline');
-        await endpoint.publish(BedayaTopics.status, DeviceStatus.offlineStatus);
+        // Straight to the transport, never the queue: a stale "offline"
+        // sent after the next connect would contradict its "online". Wait
+        // for the broker's ack, but not long: if the link is already dead,
+        // the Last Will says "offline" for us.
+        try {
+          await _transport
+              .publish(
+                _encode(BedayaTopics.status, DeviceStatus.offlineStatus, {
+                  'deviceId': endpoint.id,
+                }),
+              )
+              .timeout(const Duration(seconds: 2));
+        } on Object catch (e) {
+          _log(
+            BedayaLogLevel.warning,
+            'offline status not confirmed; the Last Will covers it',
+            e,
+          );
+        }
       }
       await _transport.disconnect();
     } finally {
@@ -341,9 +377,9 @@ class BedayaClient {
   ///
   /// Throws an [ArgumentError] if [id] is empty or contains `/`, `+` or
   /// `#`.
-  Device device(String id) {
+  DeviceRemote device(String id) {
     _checkDeviceId(id);
-    return Device(this, id);
+    return DeviceRemote(this, id);
   }
 
   /// Acts as device [id]: publish data and receive commands.
@@ -393,10 +429,17 @@ class BedayaClient {
   /// ); // → bedaya/a1/telemetry
   /// ```
   ///
-  /// While offline, the message goes into the offline queue and is sent
-  /// after the next connect; the future completes once it is queued. If
-  /// the queue is full, its oldest message is dropped and reported on
-  /// [errors].
+  /// When connected, the future completes once the broker has the
+  /// message: right away for QoS 0, and when the broker confirms it for
+  /// QoS 1 and 2. If the connection drops before that confirmation, the
+  /// message goes back into the offline queue and is sent again after the
+  /// next connect (so it may arrive twice, which QoS 1 allows).
+  ///
+  /// While offline, or while older queued messages are still being sent,
+  /// the message joins the end of the offline queue, so messages always
+  /// leave in the order they were published. The future then completes
+  /// once it is queued. If the queue is full, its oldest message is
+  /// dropped and reported on [errors].
   ///
   /// Throws an [ArgumentError] if a param is missing or invalid, and a
   /// [ConnectionException] if offline with the queue turned off.
@@ -406,7 +449,9 @@ class BedayaClient {
     Map<String, String> params = const {},
   }) async {
     final message = _encode(topic, value, params);
-    if (_state is Connected) {
+    final queue = _queue;
+    final olderWaiting = queue != null && (_draining || queue.length > 0);
+    if (_state is Connected && !olderWaiting) {
       try {
         _log(
           BedayaLogLevel.debug,
@@ -415,18 +460,37 @@ class BedayaClient {
         await _transport.publish(message);
         return;
       } on ConnectionException {
-        // The connection just dropped. Queue it below, if we can.
-        if (_queue == null) rethrow;
+        // The connection dropped before the broker confirmed it. Queue it
+        // below, if we can.
+        if (queue == null) rethrow;
       }
     }
 
-    final queue = _queue;
     if (queue == null) throw const ConnectionException('Not connected');
     final dropped = queue.enqueue(message);
     _log(
       BedayaLogLevel.debug,
-      'offline: queued ${message.topic} (${queue.length} waiting)',
+      _state is Connected
+          ? 'queued ${message.topic} behind older messages '
+                '(${queue.length} waiting)'
+          : 'offline: queued ${message.topic} (${queue.length} waiting)',
     );
+    if (_state is Connected &&
+        _transport.state == TransportState.connected &&
+        !_draining) {
+      // Connected but nothing is sending the queue (it filled up while a
+      // send was in flight): start sending it.
+      unawaited(
+        _drainQueue().catchError(
+          (Object e) => _log(
+            BedayaLogLevel.warning,
+            'connection lost while sending the queue',
+            e,
+          ),
+          test: (e) => e is ConnectionException,
+        ),
+      );
+    }
     if (dropped != null) {
       _error(
         MessageDroppedException(

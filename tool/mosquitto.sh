@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
-# Starts or stops a local Mosquitto broker in Docker for integration tests.
+# Starts or stops a local Mosquitto broker in Docker for integration tests,
+# plus a Toxiproxy in front of it to simulate a bad network.
 #
 #   tool/mosquitto.sh start   # then: BEDAYA_MOSQUITTO=1 dart test test/integration
 #   tool/mosquitto.sh stop
 #
-# Ports:
+# Ports (on 127.0.0.1 only; BEDAYA_BIND=0.0.0.0 opens them to the LAN):
 #   18830 TCP             18831 TCP + login (bedaya/secret)
 #   18080 WebSocket       18081 secure WebSocket
 #   18883 TLS             18884 TLS + client certificate
+#   18890 TCP through Toxiproxy (the tests create this proxy)
+#    8474 Toxiproxy API
 #
 # TLS uses a private CA made here (tool/mosquitto/certs/, git-ignored).
 set -euo pipefail
 
 NAME=bedaya-mosquitto
+PROXY=bedaya-toxiproxy
+NETWORK=bedaya-test
+TOXIPROXY_IMAGE=ghcr.io/shopify/toxiproxy:2.9.0
 DIR="$(cd "$(dirname "$0")/mosquitto" && pwd)"
 CERTS="$DIR/certs"
+BIND="${BEDAYA_BIND:-127.0.0.1}"
 
 make_certs() {
   [ -f "$CERTS/client.key" ] && return
@@ -40,21 +47,34 @@ make_certs() {
   cd - >/dev/null
 }
 
+stop_all() {
+  docker rm -f "$NAME" "$PROXY" >/dev/null 2>&1 || true
+  docker network rm "$NETWORK" >/dev/null 2>&1 || true
+}
+
 case "${1:-}" in
   start)
     make_certs
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    stop_all
+    # A network of our own, so Toxiproxy can reach the broker by name.
+    docker network create "$NETWORK" >/dev/null
     rm -f "$DIR/passwd"
     docker run --rm -v "$DIR:/work" eclipse-mosquitto:2 \
       sh -c 'mosquitto_passwd -b -c /work/passwd bedaya secret && chmod 644 /work/passwd'
-    docker run -d --name "$NAME" \
-      -p 18830:1883 -p 18831:1884 -p 18080:8080 -p 18081:8081 \
-      -p 18883:8883 -p 18884:8884 \
+    docker run -d --name "$NAME" --network "$NETWORK" \
+      -p "$BIND:18830:1883" -p "$BIND:18831:1884" \
+      -p "$BIND:18080:8080" -p "$BIND:18081:8081" \
+      -p "$BIND:18883:8883" -p "$BIND:18884:8884" \
       -v "$DIR:/mosquitto/config" eclipse-mosquitto:2 >/dev/null
-    echo "Mosquitto running as '$NAME'."
+    # Sits between the client and the broker. The tests tell it to drop
+    # traffic without closing the connection, like a dead WiFi link.
+    docker run -d --name "$PROXY" --network "$NETWORK" \
+      -p "$BIND:8474:8474" -p "$BIND:18890:18890" \
+      "$TOXIPROXY_IMAGE" -host=0.0.0.0 >/dev/null
+    echo "Mosquitto running as '$NAME', Toxiproxy as '$PROXY'."
     ;;
   stop)
-    docker rm -f "$NAME" >/dev/null
+    stop_all
     echo "Stopped."
     ;;
   *)
