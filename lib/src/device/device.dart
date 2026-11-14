@@ -8,24 +8,24 @@ import '../contract/messages/device_status.dart';
 import '../errors.dart';
 import '../topic/topic.dart';
 
-/// A device seen from a controller: listen to it and send it commands.
+/// A remote for one device: watch it and send it commands.
 ///
 /// ```dart
-/// final device = client.device('a1');
-/// device.status.listen((s) => print(s.online));
-/// device.on(BedayaTopics.telemetry).listen((t) => print(t['temp']));
-/// final ack = await device.send(Command.relay(on: true));
+/// final deviceRemote = client.device('device1');
+/// deviceRemote.status.listen((s) => print(s.online));
+/// deviceRemote.on(BedayaTopics.telemetry).listen((t) => print(t['temp']));
+/// final ack = await deviceRemote.send(Command.relay(on: true));
 /// ```
 ///
 /// It is cheap to create and holds no subscriptions by itself: each stream
 /// subscribes when you listen and unsubscribes when you cancel.
-class Device {
+class DeviceRemote {
   /// Use `client.device(id)` instead.
-  Device(this._client, this.id);
+  DeviceRemote(this._client, this.id);
 
   final BedayaClient _client;
 
-  /// The device id, like `a1`.
+  /// The device id, like `device1`.
   final String id;
 
   Map<String, String> get _params => {'deviceId': id};
@@ -76,3 +76,7 @@ class Device {
     }
   }
 }
+
+/// Old name of [DeviceRemote].
+@Deprecated('Use DeviceRemote. Device will be removed in 0.3.0.')
+typedef Device = DeviceRemote;

@@ -10,7 +10,7 @@ with the file and function where it happens.
  Your app
     │
     ▼
- device/       Device (controller role), DeviceEndpoint (device role), DeviceRegistry
+ device/       DeviceRemote (controller role), DeviceEndpoint (device role), DeviceRegistry
     │          thin wrappers that fill {deviceId} and call the client
     ▼
  client/       BedayaClient: prefix, encode/decode, state, errors, tracing
@@ -123,7 +123,7 @@ docker exec -it bedaya-mosquitto mosquitto_sub -t '#' -v
 
 Subscribing (when you call `listen`):
 
-1. `Device.on` → `BedayaClient.subscribe(topic, params: {'deviceId': 'a1'})`.
+1. `DeviceRemote.on` → `BedayaClient.subscribe(topic, params: {'deviceId': 'a1'})`.
 2. The filter: `TopicPattern.filter(params)` → `a1/telemetry` (a missing
    param would be `+`), then the prefix → `bedaya/a1/telemetry`.
 3. The stream is lazy. Its `onListen`:
@@ -148,7 +148,7 @@ Receiving (for each message from the broker):
    - `topic.codec.decode(payload)`. On failure: skip the message, send a
      `DecodeException` to `client.errors`, keep the stream going.
 3. The stream gets a `TopicMessage` (value + params + topic + retained).
-   `Device.on` maps it to just the value.
+   `DeviceRemote.on` maps it to just the value.
 
 ## Flow 4: the connection drops
 
@@ -191,14 +191,14 @@ Receiving (for each message from the broker):
 
 Controller: `await client.device('a1').send(Command.relay(on: true))`
 
-1. `Device.send` (`device/device.dart`) first listens on
+1. `DeviceRemote.send` (`device/device.dart`) first listens on
    `bedaya/a1/command/ack` (so a fast answer is not missed).
 2. Publishes the command on `bedaya/a1/command` (Flow 2). It carries a
    random `id`.
 3. Device side: `DeviceEndpoint.commands` delivers it; the app calls
    `me.ack(command)` → publishes `{"id": <same id>, "ok": true}` on the ack
    topic.
-4. `Device.send` gets an ack with the same id → returns it. No ack within
+4. `DeviceRemote.send` gets an ack with the same id → returns it. No ack within
    `timeout` → `CommandTimeoutException`. Either way it stops listening.
 
 ## Flow 7: all devices (DeviceRegistry)

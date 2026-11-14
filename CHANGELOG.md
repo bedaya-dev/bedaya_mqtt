@@ -1,3 +1,9 @@
+## Unreleased
+
+- `Device` (the controller role, from `client.device(id)`) is renamed to
+  `DeviceRemote`, so it is not confused with `DeviceEndpoint`. `Device`
+  still works as a deprecated alias and will be removed in 0.3.0.
+
 ## 0.1.2
 
 - pubspec description now starts with "Flutter & Dart", so the package

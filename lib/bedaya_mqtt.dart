@@ -5,7 +5,7 @@
 /// 1. Make a [BedayaClient] with a [ClientConfig] and `connect()` it.
 /// 2. Pick a role:
 ///    - **Controller** (an app watching boards): `client.device(id)` gives a
-///      [Device]. Listen with `on(topic)` and `status`, command with
+///      [DeviceRemote]. Listen with `on(topic)` and `status`, command with
 ///      `send(Command)`.
 ///    - **Device** (a board, a script, a phone): `client.asDevice(id)`
 ///      gives a [DeviceEndpoint]. Call it before `connect()`. Publish with
@@ -24,7 +24,7 @@
 /// | Part | Types |
 /// |---|---|
 /// | Client and settings | [BedayaClient], [ClientConfig], [MqttConnectionState] |
-/// | Roles | [Device], [DeviceEndpoint], [DeviceRegistry] |
+/// | Roles | [DeviceRemote], [DeviceEndpoint], [DeviceRegistry] |
 /// | Topics and payloads | [Topic], [TopicPattern], [MessageCodec], [JsonMessageCodec], [Qos] |
 /// | Standard messages | [BedayaTopics], [Telemetry], [DeviceStatus], [Command], [CommandAck] |
 /// | Reliability | [ReconnectPolicy], [MessageQueue], [MemoryQueue] |
