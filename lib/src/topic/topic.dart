@@ -25,6 +25,7 @@ class Topic<T> {
     required this.codec,
     this.qos = Qos.atLeastOnce,
     this.retained = false,
+    this.offline = OfflinePolicy.queue,
   }) : pattern = TopicPattern(pattern);
 
   /// Creates a topic whose payloads are JSON objects.
@@ -36,11 +37,13 @@ class Topic<T> {
     required Map<String, dynamic> Function(T value) toJson,
     Qos qos = Qos.atLeastOnce,
     bool retained = false,
+    OfflinePolicy offline = OfflinePolicy.queue,
   }) : this(
          pattern,
          codec: JsonMessageCodec<T>(fromJson: fromJson, toJson: toJson),
          qos: qos,
          retained: retained,
+         offline: offline,
        );
 
   /// The topic template, like `bedaya/{deviceId}/telemetry`.
@@ -57,4 +60,31 @@ class Topic<T> {
   /// A new subscriber gets the retained message right away. This is useful
   /// for state like device status, and not needed for frequent telemetry.
   final bool retained;
+
+  /// What `publish` does with a message on this topic while the client is
+  /// not connected. See [OfflinePolicy].
+  final OfflinePolicy offline;
+}
+
+/// What `BedayaClient.publish` does with a message while the client is not
+/// connected.
+///
+/// A message replayed after a reconnect arrives late. That is fine for an
+/// event log, misleading for a sensor reading (it looks current), and
+/// dangerous for a command (a relay switching an hour later). Pick per
+/// topic.
+enum OfflinePolicy {
+  /// Keep it in the offline queue and send it after the next connect. The
+  /// queue's size and TTL still apply (`ClientConfig.maxQueueSize`,
+  /// `ClientConfig.queueTtl`). The default.
+  queue,
+
+  /// Throw it away. `publish` completes normally, so a timer that
+  /// publishes readings keeps running while offline. Use for data where
+  /// only the latest value matters, like telemetry.
+  drop,
+
+  /// Throw a `ConnectionException`, so the caller decides. Use for
+  /// messages that must not arrive late, like commands.
+  fail,
 }

@@ -1,0 +1,52 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - name: Unit tests (no network)
+        run: dart test --reporter expanded $(ls -d test/*/ | grep -v integration)
+
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - run: dart analyze --fatal-infos
+      - run: dart format --output=none --set-exit-if-changed .
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - run: tool/mosquitto.sh start
+      - name: Wait for the broker
+        run: |
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/18830) 2>/dev/null && exit 0
+            sleep 1
+          done
+          docker logs bedaya-mosquitto
+          exit 1
+      - name: Integration tests (real Mosquitto)
+        run: dart test --reporter expanded test/integration/mosquitto_test.dart
+        env:
+          BEDAYA_MOSQUITTO: '1'
+      - if: always()
+        run: tool/mosquitto.sh stop || true

@@ -228,8 +228,18 @@ void main() {
           await within(
             deviceClient.connectionStates.firstWhere((s) => s is Reconnecting),
           );
-          // Published while the broker is down: queued.
+          // Published while the broker is down: telemetry is dropped
+          // (OfflinePolicy.drop), a queued topic waits for the reconnect.
           await me.publish(BedayaTopics.telemetry, const Telemetry({'n': 2}));
+          expect(deviceClient.queuedMessages, 0);
+          await me.publish(
+            Topic.json(
+              '{deviceId}/event',
+              fromJson: Telemetry.fromJson,
+              toJson: (t) => t.toJson(),
+            ),
+            const Telemetry({'n': 2}),
+          );
           expect(deviceClient.queuedMessages, 1);
 
           await docker('start');

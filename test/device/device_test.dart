@@ -164,4 +164,118 @@ void main() {
       expect(got, isEmpty);
     });
   });
+
+  group('commands while the controller is offline', () {
+    late BedayaClient offline;
+    late List<Command> got;
+
+    setUp(() async {
+      offline = BedayaClient(
+        const ClientConfig(
+          host: 'memory',
+          reconnect: ReconnectPolicy(
+            initialDelay: Duration(milliseconds: 10),
+            maxDelay: Duration(milliseconds: 40),
+            jitter: 0,
+          ),
+        ),
+        transport: MemoryTransport(broker),
+      );
+      got = [];
+      me.commands.listen((c) {
+        got.add(c);
+        me.ack(c);
+      });
+      await pumpEventQueue();
+    });
+
+    test('a command that timed out is never sent later', () async {
+      await expectLater(
+        offline
+            .device('a1')
+            .send(Command.relay(on: true), timeout: Duration(milliseconds: 50)),
+        throwsA(isA<CommandTimeoutException>()),
+      );
+      print('  queued after the timeout: ${offline.queuedMessages}');
+      expect(offline.queuedMessages, 0);
+
+      await offline.connect();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      print('  the device got: $got');
+      expect(got, isEmpty);
+    });
+
+    test('the same after a drop: the reconnect does not send it', () async {
+      final transport = MemoryTransport(broker);
+      final dropping = BedayaClient(
+        const ClientConfig(
+          host: 'memory',
+          reconnect: ReconnectPolicy(
+            initialDelay: Duration(milliseconds: 200),
+            maxDelay: Duration(milliseconds: 200),
+            jitter: 0,
+          ),
+        ),
+        transport: transport,
+      );
+      await dropping.connect();
+      transport.drop();
+      await pumpEventQueue();
+
+      await expectLater(
+        dropping
+            .device('a1')
+            .send(Command.relay(on: true), timeout: Duration(milliseconds: 50)),
+        throwsA(isA<CommandTimeoutException>()),
+      );
+      await dropping.connectionStates.firstWhere((s) => s is Connected);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(got, isEmpty);
+    });
+
+    test('is sent if the connection comes back within the timeout', () async {
+      final command = Command.relay(on: true);
+      final sending = offline
+          .device('a1')
+          .send(command, timeout: const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(got, isEmpty);
+
+      await offline.connect();
+      final ack = await sending;
+      expect(ack.commandId, command.id);
+      expect(got.map((c) => c.id), [command.id]);
+    });
+
+    test('close() while waiting throws a ConnectionException', () async {
+      final sending = offline
+          .device('a1')
+          .send(Command('ping'), timeout: const Duration(seconds: 2));
+      final result = expectLater(
+        sending,
+        throwsA(
+          allOf(
+            isA<ConnectionException>(),
+            isNot(isA<CommandTimeoutException>()),
+          ),
+        ),
+      );
+      await pumpEventQueue();
+      await offline.close();
+      await result;
+    });
+
+    test('publishing on BedayaTopics.command directly is not queued '
+        'either', () async {
+      await expectLater(
+        offline.publish(
+          BedayaTopics.command,
+          Command('ping'),
+          params: {'deviceId': 'a1'},
+        ),
+        throwsA(isA<ConnectionException>()),
+      );
+      expect(offline.queuedMessages, 0);
+    });
+  });
 }

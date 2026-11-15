@@ -47,15 +47,27 @@ class DeviceRemote {
   /// on `{deviceId}/command`, wait for an ack with the same id, stop
   /// listening.
   ///
+  /// [timeout] covers the whole round trip: waiting for the connection,
+  /// the broker's confirmation, and the device's ack. If the client is
+  /// offline, the command is **not** queued: it waits for the connection,
+  /// but only within [timeout]. Once this throws a
+  /// [CommandTimeoutException], the command is never sent again.
+  ///
+  /// A timeout means the outcome is **unknown**, not that nothing
+  /// happened: the command may have reached the device and only the
+  /// confirmation or the ack was late. So prefer commands that set a state
+  /// (`Command.relay(on: true)`) over ones that flip it, and let devices
+  /// ignore a [Command.id] they already handled.
+  ///
   /// Returns the ack even if it says the command failed; check
-  /// [CommandAck.ok]. Throws a [CommandTimeoutException] if no ack arrives
-  /// within [timeout], and a [ConnectionException] if offline with the
-  /// queue turned off. (With the queue on, an offline command waits in the
-  /// queue, and the timeout keeps counting.)
+  /// [CommandAck.ok]. Throws a [CommandTimeoutException] if the command
+  /// could not be sent, or no ack arrived, within [timeout], and a
+  /// [ConnectionException] if the client is closed meanwhile.
   Future<CommandAck> send(
     Command command, {
     Duration timeout = const Duration(seconds: 10),
   }) async {
+    final deadline = DateTime.now().add(timeout);
     final ack = Completer<CommandAck>();
     // Listen before publishing, so a fast answer is not missed.
     final acks = on(BedayaTopics.commandAck).listen((a) {
@@ -63,9 +75,24 @@ class DeviceRemote {
     });
 
     try {
-      await _client.publish(BedayaTopics.command, command, params: _params);
+      try {
+        await _client.publish(
+          BedayaTopics.command,
+          command,
+          params: _params,
+          deadline: deadline,
+        );
+      } on PublishDeadlineException catch (e) {
+        throw CommandTimeoutException(
+          'Device "$id": "${command.name}" (${command.id}) timed out after '
+          '$timeout: ${e.message}',
+          e,
+        );
+      }
+
+      final remaining = deadline.difference(DateTime.now());
       return await ack.future.timeout(
-        timeout,
+        remaining.isNegative ? Duration.zero : remaining,
         onTimeout: () => throw CommandTimeoutException(
           'Device "$id" did not answer "${command.name}" '
           '(${command.id}) within $timeout',

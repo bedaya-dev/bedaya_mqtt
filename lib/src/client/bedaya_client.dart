@@ -130,9 +130,21 @@ class BedayaClient {
   /// behind it, so nothing overtakes an older message.
   bool _draining = false;
 
-  /// The latest run of [_onConnected] after a reconnect, so the first
-  /// connect can wait for it (see [_retryFirstConnect]).
+  /// The latest run of [_onConnected], so the first connect can wait for
+  /// it (see [_retryFirstConnect]). Includes sending the queue.
   Future<void>? _restoring;
+
+  /// Completes once the latest connect has restored the subscriptions and,
+  /// as a device, published "online"; before the queue is sent. Commands
+  /// wait for this, not for the queue ([_publishBefore]), and so does
+  /// [disconnect], so its "offline" can never go out before that "online".
+  Future<void> _ready = Future<void>.value();
+
+  /// The [connect] in progress, shared by every caller until it ends.
+  Future<void>? _connecting;
+
+  /// Set by [disconnect] to cancel the [connect] in progress.
+  bool _connectCancelled = false;
 
   // --------------------------------------------------------------------
   // State
@@ -179,19 +191,41 @@ class BedayaClient {
   /// - With [ClientConfig.retryFirstConnect], keeps retrying like a
   ///   reconnect (`Reconnecting` states) and completes once connected.
   ///   Throws a [ConnectionException] if [ReconnectPolicy.maxAttempts]
-  ///   runs out, or if [disconnect] is called first.
+  ///   runs out.
   ///
-  /// Does nothing if already connected or connecting.
-  Future<void> connect() async {
-    if (_state is Connected || _state is Connecting || _state is Reconnecting) {
-      return;
-    }
+  /// If [disconnect] is called before this completes, the attempt is
+  /// cancelled: the client stays disconnected and this throws a
+  /// [ConnectionException].
+  ///
+  /// Calling it again while a connect is in progress returns the same
+  /// future, so every caller waits for the same result. Does nothing if
+  /// already connected, or while reconnecting after a drop.
+  Future<void> connect() {
+    final pending = _connecting;
+    if (pending != null) return pending;
+    if (_state is Connected || _state is Reconnecting) return Future.value();
 
+    // Cleared inside the attempt, before its future completes, so a caller
+    // that awaited it and calls connect() again starts a new attempt.
+    late final Future<void> attempt;
+    attempt = () async {
+      try {
+        await _connectOnce();
+      } finally {
+        if (identical(_connecting, attempt)) _connecting = null;
+      }
+    }();
+    return _connecting = attempt;
+  }
+
+  Future<void> _connectOnce() async {
+    _connectCancelled = false;
     _log(BedayaLogLevel.info, 'connecting to ${_address()}');
     _setState(const Connecting());
     try {
       await _transport.connect(lastWill: _lastWill);
     } on ConnectionException catch (e) {
+      if (_connectCancelled) throw ConnectionException(_cancelled, e);
       if (!config.retryFirstConnect || !config.reconnect.enabled) {
         _log(BedayaLogLevel.error, 'connect failed', e);
         _setState(Failed(e));
@@ -201,8 +235,19 @@ class BedayaClient {
       await _retryFirstConnect();
       return;
     }
-    await _onConnected();
+
+    if (_connectCancelled) {
+      // disconnect() ran while the transport was connecting. It already
+      // set Disconnected; close what just opened, without going online.
+      _log(BedayaLogLevel.info, 'connected, but disconnect() was called');
+      await _transport.disconnect();
+      throw const ConnectionException(_cancelled);
+    }
+    await (_restoring = _onConnected());
   }
+
+  static const _cancelled =
+      'disconnect() was called before the connect completed';
 
   /// Retries the first connect with the reconnect policy, and waits for
   /// the end: connected, gave up, or disconnect() was called.
@@ -222,9 +267,7 @@ class BedayaClient {
             ? error
             : ConnectionException('Could not connect', error);
       case _:
-        throw const ConnectionException(
-          'disconnect() was called before the first connect succeeded',
-        );
+        throw const ConnectionException(_cancelled);
     }
   }
 
@@ -233,6 +276,8 @@ class BedayaClient {
   /// The order matters: subscriptions first (so nothing is missed), then
   /// the online status, then the queue.
   Future<void> _onConnected() async {
+    final ready = Completer<void>();
+    _ready = ready.future;
     _log(BedayaLogLevel.info, 'connected');
     _setState(const Connected());
     try {
@@ -258,11 +303,14 @@ class BedayaClient {
         );
       }
 
+      ready.complete();
       await _drainQueue();
     } on ConnectionException catch (e) {
       // Dropped again while restoring. _onTransportState starts another
       // round of retries, and what's left in the queue stays there.
       _log(BedayaLogLevel.warning, 'connection lost while restoring', e);
+    } finally {
+      if (!ready.isCompleted) ready.complete();
     }
   }
 
@@ -289,8 +337,30 @@ class BedayaClient {
   /// In the device role, publishes the device as offline first, because
   /// the broker only sends the Last Will when a connection drops. Queued
   /// messages are kept for the next [connect].
+  ///
+  /// If a [connect] is in progress, it is cancelled and throws. A connection
+  /// attempt already on the wire is allowed to finish and is then closed,
+  /// so this can take as long as one connect attempt. When it completes,
+  /// nothing is connected and nothing will reconnect.
   Future<void> disconnect() async {
     _reconnect.stop();
+
+    final pending = _connecting;
+    if (pending != null && _state is! Connected) {
+      _log(BedayaLogLevel.info, 'disconnect: cancelling the connect');
+      _connectCancelled = true;
+      _setState(const Disconnected());
+      await pending.then<void>((_) {}, onError: (Object _) {});
+      await _reconnect.settled;
+      return;
+    }
+    if (pending != null) {
+      // Connected, still restoring subscriptions: let that finish first.
+      await pending.then<void>((_) {}, onError: (Object _) {});
+    }
+    // A reconnect attempt that was connecting closes what it opened.
+    await _reconnect.settled;
+
     if (_state is! Connected) {
       if (_state is! Disconnected) {
         _log(BedayaLogLevel.info, 'disconnected (was ${_state.runtimeType})');
@@ -302,6 +372,11 @@ class BedayaClient {
     _log(BedayaLogLevel.info, 'disconnecting');
     _disconnecting = true;
     try {
+      // A reconnect may still be restoring. Let its "online" go out first,
+      // so our "offline" comes after it. Not long: on a dead link the Last
+      // Will says "offline" anyway.
+      await _ready.timeout(const Duration(seconds: 2), onTimeout: () {});
+
       final endpoint = _endpoint;
       if (endpoint != null) {
         _log(BedayaLogLevel.info, 'device "${endpoint.id}" is offline');
@@ -431,15 +506,29 @@ class BedayaClient {
   ///
   /// When connected, the future completes once the broker has the
   /// message: right away for QoS 0, and when the broker confirms it for
-  /// QoS 1 and 2. If the connection drops before that confirmation, the
-  /// message goes back into the offline queue and is sent again after the
-  /// next connect (so it may arrive twice, which QoS 1 allows).
+  /// QoS 1 and 2.
   ///
-  /// While offline, or while older queued messages are still being sent,
-  /// the message joins the end of the offline queue, so messages always
-  /// leave in the order they were published. The future then completes
-  /// once it is queued. If the queue is full, its oldest message is
-  /// dropped and reported on [errors].
+  /// While offline, or if the connection drops before the broker confirms
+  /// the message, [Topic.offline] decides:
+  /// - [OfflinePolicy.queue] (the default): the message goes into the
+  ///   offline queue and is sent again after the next connect (so it may
+  ///   arrive twice, which QoS 1 allows). The future completes once it is
+  ///   queued. If the queue is full, its oldest message is dropped and
+  ///   reported on [errors].
+  /// - [OfflinePolicy.drop]: the message is thrown away and the future
+  ///   completes normally.
+  /// - [OfflinePolicy.fail]: throws a [ConnectionException].
+  ///
+  /// Messages of `queue` topics leave in the order they were published:
+  /// while older ones are still being sent after a reconnect, a new one
+  /// joins the end of the queue. Messages of `drop` and `fail` topics never
+  /// wait behind the queue.
+  ///
+  /// With a [deadline], the message is never queued, whatever the policy:
+  /// if offline, it waits for the connection until [deadline]; if the
+  /// broker has not confirmed it by then, it throws a
+  /// [PublishDeadlineException]. It is never sent after the deadline.
+  /// `DeviceRemote.send` uses this for commands.
   ///
   /// Throws an [ArgumentError] if a param is missing or invalid, and a
   /// [ConnectionException] if offline with the queue turned off.
@@ -447,11 +536,18 @@ class BedayaClient {
     Topic<T> topic,
     T value, {
     Map<String, String> params = const {},
+    DateTime? deadline,
   }) async {
     final message = _encode(topic, value, params);
+    if (deadline != null) return _publishBefore(message, deadline);
+
     final queue = _queue;
-    final olderWaiting = queue != null && (_draining || queue.length > 0);
-    if (_state is Connected && !olderWaiting) {
+    // Only queued topics keep their order behind older queued messages.
+    final behindQueue =
+        topic.offline == OfflinePolicy.queue &&
+        queue != null &&
+        (_draining || queue.length > 0);
+    if (_state is Connected && !behindQueue) {
       try {
         _log(
           BedayaLogLevel.debug,
@@ -460,10 +556,21 @@ class BedayaClient {
         await _transport.publish(message);
         return;
       } on ConnectionException {
-        // The connection dropped before the broker confirmed it. Queue it
-        // below, if we can.
-        if (queue == null) rethrow;
+        // The connection dropped before the broker confirmed it. Handle it
+        // as offline, below.
       }
+    }
+
+    switch (topic.offline) {
+      case OfflinePolicy.drop:
+        _log(BedayaLogLevel.debug, 'offline: dropped ${message.topic}');
+        return;
+      case OfflinePolicy.fail:
+        throw ConnectionException(
+          'Not connected; ${message.topic} is not queued (OfflinePolicy.fail)',
+        );
+      case OfflinePolicy.queue:
+        break;
     }
 
     if (queue == null) throw const ConnectionException('Not connected');
@@ -499,6 +606,75 @@ class BedayaClient {
         ),
       );
     }
+  }
+
+  /// Publishes [message] straight to the transport, never to the queue,
+  /// waiting for the connection until [deadline].
+  ///
+  /// After a (re)connect it waits for [_ready] first, so the subscriptions
+  /// are back before the message goes out. Otherwise a fast answer, like a
+  /// command ack, could arrive before we listen again. It does not wait for
+  /// the offline queue to be sent.
+  Future<void> _publishBefore(RawMessage message, DateTime deadline) async {
+    while (true) {
+      if (_state is Connected) {
+        await _ready;
+        final left = deadline.difference(DateTime.now());
+        if (_state is Connected && left > Duration.zero) {
+          _log(
+            BedayaLogLevel.debug,
+            'publish ${message.topic} ${_preview(message.payload)}',
+          );
+          try {
+            // For QoS 1 and 2 this waits for the broker's confirmation,
+            // but never past the deadline.
+            await _transport.publish(message).timeout(left);
+            return;
+          } on TimeoutException {
+            // Sent, but not confirmed in time: it may still arrive. It is
+            // not sent again.
+            _log(
+              BedayaLogLevel.warning,
+              'not confirmed before its deadline: ${message.topic}',
+            );
+            throw PublishDeadlineException(
+              '${message.topic} was sent but the broker did not confirm it '
+              'before the deadline; it may still arrive, and will not be '
+              'sent again',
+            );
+          } on ConnectionException {
+            // Dropped before the broker confirmed it. It may or may not
+            // have arrived; if there is time left, send it again after the
+            // reconnect (so it may arrive twice, which QoS 1 allows).
+          }
+        }
+      }
+
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) break;
+      _log(
+        BedayaLogLevel.debug,
+        'offline: ${message.topic} waits up to $remaining for the connection',
+      );
+      try {
+        await _states.stream
+            .firstWhere((s) => s is Connected)
+            .timeout(remaining);
+      } on TimeoutException {
+        break;
+      } on StateError {
+        throw const ConnectionException('The client was closed');
+      }
+    }
+
+    _log(
+      BedayaLogLevel.warning,
+      'not sent before its deadline: ${message.topic}',
+    );
+    throw PublishDeadlineException(
+      'Not connected; ${message.topic} was not sent before its deadline '
+      'and will not be sent later',
+    );
   }
 
   /// Listens to [topic]. Params in [params] are fixed; the others match

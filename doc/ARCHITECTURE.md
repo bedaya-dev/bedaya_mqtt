@@ -75,8 +75,10 @@ docker exec -it bedaya-mosquitto mosquitto_sub -t '#' -v
 
 `await client.connect()`
 
-1. `BedayaClient.connect` (`client/bedaya_client.dart`): returns at once if
-   already connected or connecting. Sets `Connecting`.
+1. `BedayaClient.connect` (`client/bedaya_client.dart`): if a connect is
+   already in progress, returns that same future (`_connecting`), so every
+   caller waits for the same result. Returns at once if already connected
+   or reconnecting. Otherwise sets `Connecting`.
 2. `MqttTransport.connect(lastWill: ...)`. The Last Will is only set in the
    device role (see Flow 5).
    - Real: `MqttClientTransport.connect` builds the MQTT CONNECT message
@@ -99,6 +101,11 @@ docker exec -it bedaya-mosquitto mosquitto_sub -t '#' -v
 
    A drop during these steps is caught; the next reconnect finishes the
    job.
+5. `disconnect()` while this runs (before `Connected`) cancels it: it sets
+   `_connectCancelled` and `Disconnected`, then waits for the attempt. The
+   attempt sees the flag after the transport answers, closes the
+   connection without going online, and `connect()` throws
+   `ConnectionException`.
 
 ## Flow 2: publishing
 
@@ -110,12 +117,21 @@ docker exec -it bedaya-mosquitto mosquitto_sub -t '#' -v
    - `_addPrefix`: → `bedaya/a1/telemetry`.
    - `topic.codec.encode(value)`: `Telemetry` → JSON → UTF-8 bytes.
    - QoS and retained come from the `Topic`.
-2. If `Connected`: `MqttTransport.publish(rawMessage)`. Done.
-3. If not (or the publish fails because the connection just dropped): put
-   it in the queue (`MessageQueue.enqueue`). If the queue was full, the
-   oldest message is dropped and a `MessageDroppedException` goes to
-   `client.errors`. With the queue off (`maxQueueSize: 0`), throw
-   `ConnectionException`.
+2. With a `deadline` (what `DeviceRemote.send` uses): never queue. If not
+   connected, wait for `Connected` and for `_ready` (subscriptions back
+   and "online" sent, but not the queue), then publish and wait for the
+   broker's confirmation, all within the deadline. If the deadline passes
+   first, throw `PublishDeadlineException`; the message is never sent
+   again.
+3. If `Connected`, and (for `queue` topics) nothing older is waiting in
+   the queue: `MqttTransport.publish(rawMessage)`, which for QoS 1 and 2
+   waits for the broker's confirmation. Done.
+4. If not (or the connection drops before the confirmation), the
+   topic's `OfflinePolicy` decides: `drop` returns, `fail` throws
+   `ConnectionException`, `queue` puts it in the queue
+   (`MessageQueue.enqueue`). If the queue was full, the oldest message is
+   dropped and a `MessageDroppedException` goes to `client.errors`. With
+   the queue off (`maxQueueSize: 0`), throw `ConnectionException`.
 
 ## Flow 3: subscribing and receiving
 
@@ -168,7 +184,9 @@ Receiving (for each message from the broker):
    4. Works: `onReconnected` → `_onConnected` (Flow 1, step 4):
       resubscribe, online, send the queue.
 4. `disconnect()` at any point calls `ReconnectManager.stop`. A connect that
-   finishes after that is closed again (`abandon`).
+   finishes after that is closed again (`abandon`), and `disconnect()`
+   waits for that (`ReconnectManager.settled`), so when it returns nothing
+   is connected and nothing will reconnect.
 
 ## Flow 5: being a device (online, offline, Last Will)
 
@@ -193,13 +211,18 @@ Controller: `await client.device('a1').send(Command.relay(on: true))`
 
 1. `DeviceRemote.send` (`device/device.dart`) first listens on
    `bedaya/a1/command/ack` (so a fast answer is not missed).
-2. Publishes the command on `bedaya/a1/command` (Flow 2). It carries a
-   random `id`.
+2. Publishes the command on `bedaya/a1/command` with a deadline of now +
+   `timeout` (Flow 2, step 2). It carries a random `id`. It is never put in
+   the offline queue: if the client is offline it waits for the
+   connection, and if the deadline passes first it throws
+   `CommandTimeoutException`. A command that timed out is never sent
+   later.
 3. Device side: `DeviceEndpoint.commands` delivers it; the app calls
    `me.ack(command)` → publishes `{"id": <same id>, "ok": true}` on the ack
    topic.
-4. `DeviceRemote.send` gets an ack with the same id → returns it. No ack within
-   `timeout` → `CommandTimeoutException`. Either way it stops listening.
+4. `DeviceRemote.send` gets an ack with the same id → returns it. No ack
+   before the deadline → `CommandTimeoutException`. Either way it stops
+   listening.
 
 ## Flow 7: all devices (DeviceRegistry)
 
@@ -222,7 +245,7 @@ devices (`+` for `deviceId`). For each message it updates a `DeviceInfo`:
 | Status stays `online` after a device died | The broker waits 1.5 × `keepAlive` before sending the will. |
 | Two clients keep reconnecting | Same `clientId` on both: the broker kicks one off each time. |
 | `send()` times out | The device must call `me.ack(command)`. Is it online? Same prefix? |
-| Old messages arrive after a reconnect | The offline queue. Use `queueTtl` to drop old ones. |
+| Old messages arrive after a reconnect | The offline queue. Use `queueTtl`, or `OfflinePolicy.drop` on that topic. |
 
 ## Tests
 
