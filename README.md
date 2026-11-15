@@ -46,12 +46,13 @@ final client = BedayaClient(
 );
 await client.connect();
 
-final device = client.device('a1');
-device.status.listen((s) => print(s.online ? 'online' : 'offline'));
-device.on(BedayaTopics.telemetry).listen((t) => print('temp: ${t['temp']}'));
+// A remote for one device: watch it and send it commands.
+final fanRemote = client.device('living-room-fan');
+fanRemote.status.listen((s) => print(s.online ? 'online' : 'offline'));
+fanRemote.on(BedayaTopics.telemetry).listen((t) => print('temp: ${t['temp']}'));
 
-final ack = await device.send(Command.relay(on: true));
-print(ack.ok ? 'relay is on' : 'failed: ${ack.error}');
+final ack = await fanRemote.send(Command.relay(on: true));
+print(ack.ok ? 'fan is on' : 'failed: ${ack.error}');
 ```
 
 ### Device: publish data and answer commands
@@ -61,22 +62,22 @@ final client = BedayaClient(
   ClientConfig(host: 'broker.hivemq.com', topicPrefix: 'bedaya-yourname'),
 );
 
-// Call asDevice before connect: it sets the Last Will, so the broker
-// reports the device offline if it drops off.
-final me = client.asDevice('a1');
+// This program *is* the fan. Call asDevice before connect: it sets the
+// Last Will, so the broker reports the fan offline if it drops off.
+final fan = client.asDevice('living-room-fan');
 await client.connect();
 
-me.commands.listen((command) {
+fan.commands.listen((command) {
   if (command.name == 'relay') {
     final on = command.params['on'] as bool;
     // ... switch the relay ...
-    me.ack(command);
+    fan.ack(command);
   } else {
-    me.ack(command, error: 'unknown command');
+    fan.ack(command, error: 'unknown command');
   }
 });
 
-await me.publish(BedayaTopics.telemetry, Telemetry({'temp': 24.5}));
+await fan.publish(BedayaTopics.telemetry, Telemetry({'temp': 24.5}));
 ```
 
 The client publishes `online` when it connects and `offline` when it
@@ -86,6 +87,24 @@ disconnects. If the connection dies, the broker publishes `offline` for it
 Runnable versions are in [`example/`](example/): `example.dart` runs both
 roles in one program, and `simulated_device.dart` + `controller.dart` run in
 two terminals.
+
+### Common mistakes
+
+- **`asDevice` after `connect`.** It throws: the Last Will has to be in the
+  CONNECT message. Call `asDevice` first.
+- **Different `topicPrefix` on the two sides.** Then they never see each
+  other, with no error. Both must use the same prefix (and the same
+  device id).
+- **The same `clientId` on two clients.** The broker keeps kicking one off,
+  so both reconnect forever. Leave `clientId` empty for a random one.
+- **Not answering a command.** Every command needs `ack(command)`, even a
+  failed one (`ack(command, error: ...)`), or `send` waits until its
+  timeout.
+- **Device ids with `/`, `+` or `#`.** They are MQTT topic levels and
+  wildcards, so they are rejected. Use letters, digits, `-` and `_`.
+- **Expecting QoS 0 to survive a dropped connection.** It is "send and
+  forget". Use QoS 1 (the default for `Topic.json`) for anything that must
+  arrive. See [Delivery guarantees](#delivery-guarantees).
 
 ## Topics
 
@@ -165,6 +184,40 @@ ClientConfig(
 
 Use `ReconnectPolicy.never()` to turn it off.
 
+## Delivery guarantees
+
+What `await client.publish(...)` means, and what happens when the network
+goes away:
+
+| | QoS 0, `drop` topics (`BedayaTopics.telemetry`) | QoS 1, `queue` topics (default for `Topic.json`, acks) |
+|---|---|---|
+| Connected | Completes once sent. | Completes when the **broker confirms** it (PUBACK). |
+| Offline | **Dropped**: a reading replayed later would look current. | Goes into the offline queue; sent after the reconnect. |
+| Connection drops before the broker confirms | May be lost. | Goes back into the offline queue and is **sent again** after the reconnect. |
+| Arrives | At most once. | **At least once**: possibly twice, never lost. |
+
+Commands are different: `send()` never queues them (see
+[Offline queue](#offline-queue)).
+
+- **Dead links are noticed.** If the network vanishes without closing the
+  connection (lost WiFi, WiFi → 4G), a ping with no answer ends the
+  connection after about 2 × `keepAlive`, and the client reconnects.
+  Lower `keepAlive` to notice sooner, at the cost of more traffic.
+- **Order is kept.** Queued messages are sent oldest first, and new ones
+  on `queue` topics wait behind them until the queue is empty.
+- **Duplicates are possible with QoS 1.** A message whose ack was lost is
+  sent again. For commands, compare `Command.id` if running one twice
+  would be a problem.
+- **A `CommandTimeoutException` means the outcome is unknown**, not that
+  nothing happened: the command may have reached the device and only the
+  confirmation or the ack was late. It is never sent again after the
+  timeout. Prefer commands that set a state (`Command.relay(on: true)`)
+  over ones that flip it.
+- **Receivers miss what is sent while they are offline.** Sessions are
+  clean: the queue covers the *sender's* offline time, not the
+  receiver's. A device's retained `status` is always delivered on
+  subscribe.
+
 ## Offline queue
 
 While not connected, what `publish` does depends on the topic's
@@ -172,7 +225,7 @@ While not connected, what `publish` does depends on the topic's
 
 | Policy | While offline | Used by |
 |---|---|---|
-| `queue` (default) | Kept, and sent in order after the next connect (after resubscribing) | `commandAck`, your own topics |
+| `queue` (default) | Kept, and sent in order after the next connect (after resubscribing), waiting for the broker's confirmation of each QoS 1 or 2 message | `commandAck`, your own topics |
 | `drop` | Thrown away; `publish` completes normally | `telemetry`, `status` |
 | `fail` | `publish` throws `ConnectionException` | `command` |
 
@@ -204,32 +257,6 @@ A dropped message is reported on `client.errors` as a
 `MessageDroppedException`. The default queue lives in memory. To keep
 messages across app restarts, implement `MessageQueue` and pass it as
 `BedayaClient(config, queue: myQueue)`.
-
-## Delivery guarantees
-
-Be precise about what "sent" means. There are three levels:
-
-1. **Handed to the socket.** For QoS 0, `publish` completes here. Nothing
-   confirms it arrived.
-2. **Broker confirmed (PUBACK / PUBCOMP).** For QoS 1 and 2, `publish`
-   completes only here. If the connection ends first, a `queue` topic's
-   message goes back into the offline queue and is sent again after the
-   reconnect: **at least once**, so it may arrive twice.
-3. **Device handled it.** Only the command ack tells you this:
-   `device.send()` returns once the device answered.
-
-A dead link with no TCP close (lost WiFi) is noticed after about two
-`keepAlive` periods, then the client reconnects.
-
-What this means in practice:
-
-- Devices should ignore a `Command.id` they have already handled.
-- A `CommandTimeoutException` means the outcome is **unknown**: the
-  command may have reached the device and only the ack was late. It is
-  never sent again after the timeout. Prefer commands that set a state
-  (`Command.relay(on: true)`) over ones that flip it.
-- The offline queue lives in memory by default, so it does not survive an
-  app restart. Implement `MessageQueue` to keep it on disk.
 
 ## TLS
 
@@ -335,13 +362,13 @@ Use `transport.drop()` to simulate a lost connection, and
 
 ## Good to know
 
-- Client ids must be unique. Two connections with the same id keep kicking
-  each other off the broker. Leave `clientId` empty for a random one.
-- Sessions are clean: while a controller is offline, it misses messages
-  that devices send. The offline queue covers the *sender's* offline time,
-  for topics with `OfflinePolicy.queue`.
 - A second stream on a topic that is already subscribed does not get the
   retained message again (brokers send it only on subscribe).
+- The offline queue lives in memory: it is lost if the app stops. To keep
+  it across restarts, implement `MessageQueue` (see above).
+
+See also [Common mistakes](#common-mistakes) and
+[Delivery guarantees](#delivery-guarantees).
 
 ## About Bedaya
 

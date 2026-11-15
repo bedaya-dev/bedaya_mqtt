@@ -44,8 +44,9 @@ jobs:
           done
           docker logs bedaya-mosquitto
           exit 1
-      - name: Integration tests (real Mosquitto)
-        run: dart test --reporter expanded test/integration/mosquitto_test.dart
+      - name: Integration tests (real Mosquitto + Toxiproxy)
+        # One file at a time: some tests restart the shared broker.
+        run: dart test --reporter expanded --concurrency=1 test/integration
         env:
           BEDAYA_MOSQUITTO: '1'
       - if: always()

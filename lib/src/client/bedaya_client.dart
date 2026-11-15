@@ -547,6 +547,7 @@ class BedayaClient {
         topic.offline == OfflinePolicy.queue &&
         queue != null &&
         (_draining || queue.length > 0);
+    var unconfirmed = false;
     if (_state is Connected && !behindQueue) {
       try {
         _log(
@@ -558,6 +559,7 @@ class BedayaClient {
       } on ConnectionException {
         // The connection dropped before the broker confirmed it. Handle it
         // as offline, below.
+        unconfirmed = true;
       }
     }
 
@@ -575,12 +577,15 @@ class BedayaClient {
 
     if (queue == null) throw const ConnectionException('Not connected');
     final dropped = queue.enqueue(message);
+    final waiting = '(${queue.length} waiting)';
     _log(
       BedayaLogLevel.debug,
-      _state is Connected
-          ? 'queued ${message.topic} behind older messages '
-                '(${queue.length} waiting)'
-          : 'offline: queued ${message.topic} (${queue.length} waiting)',
+      unconfirmed
+          ? 'not confirmed before the connection ended: queued '
+                '${message.topic} again $waiting'
+          : _state is Connected
+          ? 'queued ${message.topic} behind older messages $waiting'
+          : 'offline: queued ${message.topic} $waiting',
     );
     if (_state is Connected &&
         _transport.state == TransportState.connected &&

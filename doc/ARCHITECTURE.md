@@ -96,8 +96,13 @@ docker exec -it bedaya-mosquitto mosquitto_sub -t '#' -v
    1. `Connected`.
    2. Subscribe to every filter in `SubscriptionRegistry.filters` (the
       broker forgot them; clean session).
-   3. Device role: publish `{"online": true}` (retained).
-   4. Send what's in the offline queue (`MessageQueue.drain`).
+   3. Device role: publish `{"online": true}` (retained), straight to the
+      transport, never through the queue. Then `_ready` completes:
+      commands (`_publishBefore`) and `disconnect()` wait for this point,
+      not for the queue.
+   4. Send what's in the offline queue: `_drainQueue` →
+      `MessageQueue.drain`, oldest first, waiting for the broker's ack of
+      each QoS 1/2 message. `_draining` is true meanwhile (see Flow 2).
 
    A drop during these steps is caught; the next reconnect finishes the
    job.
@@ -120,18 +125,37 @@ docker exec -it bedaya-mosquitto mosquitto_sub -t '#' -v
 2. With a `deadline` (what `DeviceRemote.send` uses): never queue. If not
    connected, wait for `Connected` and for `_ready` (subscriptions back
    and "online" sent, but not the queue), then publish and wait for the
-   broker's confirmation, all within the deadline. If the deadline passes
-   first, throw `PublishDeadlineException`; the message is never sent
-   again.
-3. If `Connected`, and (for `queue` topics) nothing older is waiting in
-   the queue: `MqttTransport.publish(rawMessage)`, which for QoS 1 and 2
-   waits for the broker's confirmation. Done.
-4. If not (or the connection drops before the confirmation), the
-   topic's `OfflinePolicy` decides: `drop` returns, `fail` throws
-   `ConnectionException`, `queue` puts it in the queue
-   (`MessageQueue.enqueue`). If the queue was full, the oldest message is
-   dropped and a `MessageDroppedException` goes to `client.errors`. With
-   the queue off (`maxQueueSize: 0`), throw `ConnectionException`.
+   broker's confirmation (step 3), all within the deadline. If the
+   deadline passes first, throw `PublishDeadlineException`; the message is
+   never sent again.
+3. If `Connected` and nothing older is waiting (queue empty, not
+   `_draining`; only checked for `queue` topics):
+   `MqttTransport.publish(rawMessage)`.
+   - Real: `MqttClientTransport.publish` hands it to
+     `mqtt_client.publishMessage`, which returns a message id at once.
+     QoS 0: done. QoS 1/2: a `Completer` goes into `_pendingAcks[id]`, and
+     the future completes when that id comes back on mqtt_client's
+     `published` stream (PUBACK for QoS 1, PUBCOMP for QoS 2), in
+     `_onAck`.
+   - If the connection ends first, `_cleanUp` fails every pending
+     completer with a `ConnectionException`. mqtt_client itself forgets
+     unconfirmed messages when a clean session ends, so this is the only
+     place they can be saved.
+4. Otherwise (offline, older messages waiting, or step 3 threw because the
+   connection ended), the topic's `OfflinePolicy` decides: `drop` returns,
+   `fail` throws `ConnectionException`, `queue` puts it at the end of the
+   queue (`MessageQueue.enqueue`). The trace says which case it was. If
+   the queue was full, the oldest message is dropped and a
+   `MessageDroppedException` goes to `client.errors`. With the queue off
+   (`maxQueueSize: 0`), throw `ConnectionException`.
+5. If connected but no drain is running, start one (`_drainQueue`).
+
+Why "nothing older is waiting" matters: after a reconnect the queue is
+sent one confirmed message at a time. A new message sent straight away
+would overtake the queued ones, and "on" then "off" could arrive as "off"
+then "on". `drop` and `fail` topics (telemetry, commands) don't wait:
+their order relative to queued messages doesn't matter, and a command
+must not sit behind a long queue.
 
 ## Flow 3: subscribing and receiving
 
@@ -170,7 +194,15 @@ Receiving (for each message from the broker):
 
 1. The transport sets its state to `disconnected`.
    - Real: mqtt_client calls `onDisconnected`
-     → `MqttClientTransport._onDisconnected`.
+     → `MqttClientTransport._onDisconnected`. That happens when the socket
+     closes, or when a keepAlive ping gets no answer within one more
+     `keepAlive` (`disconnectOnNoResponsePeriod`, set in the
+     `MqttClientTransport` constructor). The second case is what catches
+     a link that died without closing (lost WiFi): without it the client
+     stays "connected" until the operating system gives up, which takes
+     many minutes.
+   - Unconfirmed QoS 1/2 publishes fail and go back to the queue
+     (Flow 2, step 2).
    - Test: `MemoryTransport.drop()`.
 2. `BedayaClient._onTransportState` sees it. It's a real drop if we were
    `Connected` and not inside `disconnect()`.
@@ -199,9 +231,12 @@ Receiving (for each message from the broker):
    CONNECT message. The **broker** now holds it.
 3. `_onConnected` publishes `{"online": true}` (retained).
 4. Leaving:
-   - `disconnect()`: the client publishes `{"online": false}` itself, then
-     disconnects. (The broker never sends the will after a clean
-     disconnect.)
+   - `disconnect()`: the client publishes `{"online": false}` itself,
+     straight to the transport, and waits at most 2 seconds for the ack,
+     then disconnects. (The broker never sends the will after a clean
+     disconnect.) It never goes through the queue: a queued "offline"
+     would be sent after the next connect's "online". If the link is
+     already dead, the will covers it.
    - Power cut, lost WiFi, killed process: the broker notices (the socket
      closes, or no ping within 1.5 × `keepAlive`) and publishes the will.
 
@@ -246,6 +281,9 @@ devices (`+` for `deviceId`). For each message it updates a `DeviceInfo`:
 | Two clients keep reconnecting | Same `clientId` on both: the broker kicks one off each time. |
 | `send()` times out | The device must call `me.ack(command)`. Is it online? Same prefix? |
 | Old messages arrive after a reconnect | The offline queue. Use `queueTtl`, or `OfflinePolicy.drop` on that topic. |
+| The same QoS 1 message arrives twice | Expected after a dropped connection: its ack was lost, so it was sent again. Trace: `not confirmed before the connection ended`. |
+| `await publish()` takes a while | QoS 1/2 waits for the broker's ack: one round trip, or until the link is found dead (about 2 × `keepAlive`). |
+| Still "connected" on a dead network | `keepAlive` too long, or `disconnectOnNoResponsePeriod` not set (`MqttClientTransport` constructor). |
 
 ## Tests
 
@@ -255,4 +293,4 @@ devices (`+` for `deviceId`). For each message it updates a `DeviceInfo`:
 | `test/transport/` | `MemoryTransport` and topic filters. |
 | `test/client/` | The client on `MemoryTransport`: connect, prefix, subscribe, reconnect, queue, tracing. |
 | `test/device/` | Controller and device talking through the memory broker. |
-| `test/integration/` | A real Mosquitto in Docker (`tool/mosquitto.sh start`, then `BEDAYA_MOSQUITTO=1 dart test`), and a real browser (`dart test -p chrome test/integration/web_test.dart`). |
+| `test/integration/` | A real Mosquitto in Docker, plus a Toxiproxy in front of it for bad-network tests (`reliability_test.dart`): `tool/mosquitto.sh start`, then `BEDAYA_MOSQUITTO=1 dart test test/integration --concurrency=1` (one file at a time, because some tests restart the shared broker). And a real browser (`dart test -p chrome test/integration/web_test.dart`). |
