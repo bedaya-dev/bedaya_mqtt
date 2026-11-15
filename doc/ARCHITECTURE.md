@@ -110,7 +110,10 @@ docker exec -it bedaya-mosquitto mosquitto_sub -t '#' -v
    `_connectCancelled` and `Disconnected`, then waits for the attempt. The
    attempt sees the flag after the transport answers, closes the
    connection without going online, and `connect()` throws
-   `ConnectionException`.
+   `ConnectionException`. After `Connected` (restoring or sending the
+   queue), `disconnect()` only waits for `_ready`, then closes the
+   connection: the drain fails at once, what it had not sent stays
+   queued, and `connect()` completes.
 
 ## Flow 2: publishing
 
@@ -202,7 +205,7 @@ Receiving (for each message from the broker):
      stays "connected" until the operating system gives up, which takes
      many minutes.
    - Unconfirmed QoS 1/2 publishes fail and go back to the queue
-     (Flow 2, step 2).
+     (Flow 2, step 3).
    - Test: `MemoryTransport.drop()`.
 2. `BedayaClient._onTransportState` sees it. It's a real drop if we were
    `Connected` and not inside `disconnect()`.
@@ -215,7 +218,9 @@ Receiving (for each message from the broker):
       `Failed` after `maxAttempts`).
    4. Works: `onReconnected` → `_onConnected` (Flow 1, step 4):
       resubscribe, online, send the queue.
-4. `disconnect()` at any point calls `ReconnectManager.stop`. A connect that
+4. `disconnect()` sets `_disconnecting` on its first line, so a drop
+   while it waits is never taken for a reason to reconnect (step 2), and
+   calls `ReconnectManager.stop` both first and last. A connect that
    finishes after that is closed again (`abandon`), and `disconnect()`
    waits for that (`ReconnectManager.settled`), so when it returns nothing
    is connected and nothing will reconnect.

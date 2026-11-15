@@ -182,6 +182,13 @@ class BedayaClient {
   /// listened to. In the device role it also publishes the device as
   /// online. Then it sends what was queued while offline.
   ///
+  /// Completes once the connection setup is done: subscriptions restored
+  /// and one attempt at sending the offline queue made. If the connection
+  /// drops during that, it still completes; what was not sent stays
+  /// queued, and the client is then `Reconnecting` by itself. So a
+  /// completed connect() does not mean "connected right now": watch
+  /// [connectionStates] for that.
+  ///
   /// If the connection drops later, the client reconnects by itself (see
   /// [ClientConfig.reconnect]).
   ///
@@ -338,43 +345,53 @@ class BedayaClient {
   /// the broker only sends the Last Will when a connection drops. Queued
   /// messages are kept for the next [connect].
   ///
-  /// If a [connect] is in progress, it is cancelled and throws. A connection
-  /// attempt already on the wire is allowed to finish and is then closed,
-  /// so this can take as long as one connect attempt. When it completes,
-  /// nothing is connected and nothing will reconnect.
+  /// If a [connect] is still connecting, it is cancelled and throws. A
+  /// connection attempt already on the wire is allowed to finish and is
+  /// then closed, so this can take as long as one connect attempt. If the
+  /// connect is already connected and sending the offline queue, this does
+  /// not wait for the queue: it closes the connection, the rest of the
+  /// queue stays for the next [connect], and that connect completes.
+  ///
+  /// When this completes, nothing is connected and nothing will reconnect,
+  /// even if the connection dropped meanwhile.
   Future<void> disconnect() async {
-    _reconnect.stop();
-
-    final pending = _connecting;
-    if (pending != null && _state is! Connected) {
-      _log(BedayaLogLevel.info, 'disconnect: cancelling the connect');
-      _connectCancelled = true;
-      _setState(const Disconnected());
-      await pending.then<void>((_) {}, onError: (Object _) {});
-      await _reconnect.settled;
-      return;
-    }
-    if (pending != null) {
-      // Connected, still restoring subscriptions: let that finish first.
-      await pending.then<void>((_) {}, onError: (Object _) {});
-    }
-    // A reconnect attempt that was connecting closes what it opened.
-    await _reconnect.settled;
-
-    if (_state is! Connected) {
-      if (_state is! Disconnected) {
-        _log(BedayaLogLevel.info, 'disconnected (was ${_state.runtimeType})');
-        _setState(const Disconnected());
-      }
-      return;
-    }
-
-    _log(BedayaLogLevel.info, 'disconnecting');
+    // From the first line: a connection that drops while we wait below is
+    // not a reason to reconnect (see _onTransportState).
     _disconnecting = true;
     try {
-      // A reconnect may still be restoring. Let its "online" go out first,
-      // so our "offline" comes after it. Not long: on a dead link the Last
-      // Will says "offline" anyway.
+      _reconnect.stop();
+
+      final pending = _connecting;
+      if (pending != null && _state is! Connected) {
+        _log(BedayaLogLevel.info, 'disconnect: cancelling the connect');
+        _connectCancelled = true;
+        _setState(const Disconnected());
+        await pending.then<void>((_) {}, onError: (Object _) {});
+        await _reconnect.settled;
+        return;
+      }
+      // A reconnect attempt that was connecting closes what it opened.
+      await _reconnect.settled;
+
+      if (_state is! Connected) {
+        // Not reached with a connect() in progress today (that is the
+        // cancel above, and a drop now leaves the state alone), but the
+        // promise below must not depend on that.
+        if (pending != null) {
+          await pending.then<void>((_) {}, onError: (Object _) {});
+        }
+        if (_state is! Disconnected) {
+          _log(BedayaLogLevel.info, 'disconnected (was ${_state.runtimeType})');
+          _setState(const Disconnected());
+        }
+        return;
+      }
+
+      _log(BedayaLogLevel.info, 'disconnecting');
+      // A (re)connect may still be restoring. Let its "online" go out
+      // first, so our "offline" comes after it. Not long: on a dead link
+      // the Last Will says "offline" anyway. This does not wait for the
+      // offline queue.
       await _ready.timeout(const Duration(seconds: 2), onTimeout: () {});
 
       final endpoint = _endpoint;
@@ -401,11 +418,20 @@ class BedayaClient {
         }
       }
       await _transport.disconnect();
+
+      // A connect() still sending the offline queue fails fast now that
+      // the connection is closed; what it had not sent stays queued. Wait
+      // for it, so a connect() after this one starts a new attempt.
+      if (pending != null) {
+        await pending.then<void>((_) {}, onError: (Object _) {});
+      }
+      _log(BedayaLogLevel.info, 'disconnected');
+      _setState(const Disconnected());
     } finally {
+      // In case anything started it while we waited.
+      _reconnect.stop();
       _disconnecting = false;
     }
-    _log(BedayaLogLevel.info, 'disconnected');
-    _setState(const Disconnected());
   }
 
   /// Disconnects and closes every stream. The client can't be used after.

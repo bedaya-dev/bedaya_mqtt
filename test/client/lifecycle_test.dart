@@ -8,7 +8,16 @@ import 'package:test/test.dart';
 /// A [MemoryTransport] whose connect can be held open, to call
 /// `disconnect()` or `connect()` while a connect is on the wire.
 class GatedTransport implements MqttTransport {
-  GatedTransport(this.inner);
+  GatedTransport(this.inner) {
+    // Like MqttClientTransport: when the connection ends, by a drop or a
+    // disconnect, publishes the broker never confirmed fail at once.
+    inner.states.listen((s) {
+      final p = publishGate;
+      if (s == TransportState.disconnected && p != null && !p.isCompleted) {
+        p.complete();
+      }
+    });
+  }
 
   final MemoryTransport inner;
 
@@ -21,6 +30,11 @@ class GatedTransport implements MqttTransport {
   /// While set, `disconnect` waits for it, to leave the socket open after
   /// the client has sent its last message.
   Completer<void>? disconnectGate;
+
+  /// While set, `publish` waits for it, to hold a queue drain halfway, like
+  /// a broker that is slow to confirm. The end of the connection releases
+  /// it (see the constructor); the tests never open it by hand.
+  Completer<void>? publishGate;
 
   int connectCalls = 0;
 
@@ -59,7 +73,11 @@ class GatedTransport implements MqttTransport {
   Future<void> unsubscribe(String filter) => inner.unsubscribe(filter);
 
   @override
-  Future<void> publish(RawMessage message) => inner.publish(message);
+  Future<void> publish(RawMessage message) async {
+    final g = publishGate;
+    if (g != null) await g.future;
+    await inner.publish(message);
+  }
 }
 
 const fast = ReconnectPolicy(
@@ -224,5 +242,105 @@ void main() {
     final text = status == null ? null : utf8.decode(status.payload);
     print('  retained status: $text');
     expect(text, contains('"online":false'));
+  });
+
+  group('disconnect() while the first connect sends the queue', () {
+    Future<void> queueOne(BedayaClient c) => c.publish(
+      BedayaTopics.commandAck, // OfflinePolicy.queue
+      CommandAck.success(Command('ping')),
+      params: {'deviceId': 'a1'},
+    );
+
+    test('a drop meanwhile does not bring the client back', () async {
+      await queueOne(client);
+      transport.publishGate = Completer(); // the broker is slow to confirm
+      var connectDone = false;
+      final connecting = client.connect().whenComplete(() {
+        connectDone = true;
+      });
+      await client.connectionStates.firstWhere((s) => s is Connected);
+      await pumpEventQueue(); // the drain is now waiting on the broker
+
+      final disconnecting = client.disconnect();
+      transport.inner.drop(); // and the network dies while we wait
+      await disconnecting;
+      expect(
+        connectDone,
+        isTrue,
+        reason: 'connect() over when disconnect returns',
+      );
+      await connecting; // and it completed without an error
+      // Longer than the reconnect delay (10ms): a re-armed timer would
+      // have fired by now.
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      print('  states: $states');
+      expect(client.connectionState, isA<Disconnected>());
+      expect(states.whereType<Reconnecting>(), isEmpty);
+      expect(broker.clientCount, 0);
+    });
+
+    test('it does not wait for a stalled queue', () async {
+      await queueOne(client);
+      transport.publishGate = Completer(); // never confirmed
+      var connectDone = false;
+      final connecting = client.connect().whenComplete(() {
+        connectDone = true;
+      });
+      await client.connectionStates.firstWhere((s) => s is Connected);
+      await pumpEventQueue();
+
+      final started = DateTime.now();
+      await client.disconnect().timeout(const Duration(seconds: 1));
+      print('  disconnect took ${DateTime.now().difference(started)}');
+      expect(
+        connectDone,
+        isTrue,
+        reason: 'connect() over when disconnect returns',
+      );
+      await connecting; // and it completed without an error
+
+      expect(client.connectionState, isA<Disconnected>());
+      expect(client.queuedMessages, 1, reason: 'kept for the next connect');
+    });
+
+    test('the next connect() starts fresh and sends what was left', () async {
+      await queueOne(client);
+      transport.publishGate = Completer();
+      var firstDone = false;
+      final first = client.connect().whenComplete(() {
+        firstDone = true;
+      });
+      await client.connectionStates.firstWhere((s) => s is Connected);
+      await pumpEventQueue();
+      await client.disconnect();
+      expect(firstDone, isTrue, reason: 'no old connect() left behind');
+      await first;
+
+      transport.publishGate = null;
+      await client.connect();
+      expect(client.connectionState, isA<Connected>());
+      expect(transport.connectCalls, 2);
+      expect(client.queuedMessages, 0);
+    });
+    test(
+      'a drop alone releases a stalled drain; the reconnect sends it',
+      () async {
+        await queueOne(client);
+        transport.publishGate = Completer(); // never confirmed by hand
+        final connecting = client.connect();
+        await client.connectionStates.firstWhere((s) => s is Connected);
+        await pumpEventQueue();
+
+        transport.inner.drop();
+        // connect() completes (the drain failed), and the client reconnects.
+        await connecting.timeout(const Duration(seconds: 1));
+        transport.publishGate = null;
+        await client.connectionStates.firstWhere((s) => s is Connected);
+        await pumpEventQueue();
+        expect(client.queuedMessages, 0, reason: 'sent after the reconnect');
+        await client.disconnect();
+      },
+    );
   });
 }

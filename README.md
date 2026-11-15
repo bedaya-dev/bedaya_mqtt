@@ -194,11 +194,17 @@ goes away:
 | Connected | Completes once sent. | Completes when the **broker confirms** it (PUBACK). |
 | Offline | **Dropped**: a reading replayed later would look current. | Goes into the offline queue; sent after the reconnect. |
 | Connection drops before the broker confirms | May be lost. | Goes back into the offline queue and is **sent again** after the reconnect. |
-| Arrives | At most once. | **At least once**: possibly twice, never lost. |
+| Arrives | At most once. | **At least once** while it stays in the queue: possibly twice. |
 
 Commands are different: `send()` never queues them (see
 [Offline queue](#offline-queue)).
 
+- **"At least once" has limits.** A queued message is sent again until
+  the broker confirms it, as long as it is still in the queue and the
+  connection comes back. It is lost if the queue is full (the oldest
+  message goes, reported on `client.errors`), if it is older than
+  `queueTtl`, or if the app stops (the default queue lives in memory;
+  implement `MessageQueue` to keep it on disk).
 - **Dead links are noticed.** If the network vanishes without closing the
   connection (lost WiFi, WiFi → 4G), a ping with no answer ends the
   connection after about 2 × `keepAlive`, and the client reconnects.

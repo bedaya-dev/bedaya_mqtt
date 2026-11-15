@@ -28,6 +28,13 @@ them can change what your app sees.
   and a device does not go online. `disconnect()` also waits for a
   reconnect attempt already on the wire, so nothing reconnects after it
   returns.
+- **`disconnect()` could be undone by a dropped connection.** If the
+  connection dropped while `disconnect()` waited for a connect that was
+  still sending the offline queue, the client reconnected after
+  `disconnect()` returned. Now a drop during `disconnect()` never starts a
+  reconnect, and `disconnect()` no longer waits for the queue: it closes
+  the connection, and what was not sent stays queued for the next
+  `connect()`.
 - **A device could stay "online" after `disconnect()`.** `disconnect()`
   now sends `offline` straight to the broker (never through the queue,
   where it could arrive after the next `online`), waits at most 2 seconds
@@ -58,6 +65,11 @@ them can change what your app sees.
   still works as a deprecated alias and will be removed in 0.3.0.
 - Calling `connect()` again while it is in progress returns the same
   future, instead of completing at once before the client is connected.
+- `connect()` completes once the connection setup is done: subscriptions
+  restored and one attempt at sending the offline queue made. If the
+  connection drops during that, `connect()` still completes, what was not
+  sent stays queued, and the client reconnects by itself; watch
+  `connectionStates` for the current state.
 
 ### Other
 
