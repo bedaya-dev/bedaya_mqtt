@@ -95,7 +95,11 @@ docker exec -it bedaya-mosquitto mosquitto_sub -t '#' -v
 4. If it works: `_onConnected`, which runs after **every** connect:
    1. `Connected`.
    2. Subscribe to every filter in `SubscriptionRegistry.filters` (the
-      broker forgot them; clean session).
+      broker forgot them; clean session). All requests go out at once,
+      then it waits until the broker has answered each (SUBACK). A refused
+      one becomes a `SubscriptionException` on `client.errors` (context
+      `firstConnect` or `reconnect`) and stays registered, so the next
+      reconnect asks again; the others carry on.
    3. Device role: publish `{"online": true}` (retained), straight to the
       transport, never through the queue. Then `_ready` completes:
       commands (`_publishBefore`) and `disconnect()` wait for this point,
@@ -173,7 +177,17 @@ Subscribing (when you call `listen`):
    - listens to `MqttTransport.messages` (every incoming message);
    - `_addListener` → `SubscriptionRegistry.add`. Only the **first**
      listener of a filter (or a higher QoS) subscribes for real, and only if
-     connected. Otherwise `_onConnected` does it later.
+     connected. Otherwise `_onConnected` does it later. A refusal goes to
+     `client.errors` (context `newListener`), never to the stream: an
+     error event on a stream listened to without `onError` would crash a
+     CLI program.
+   - Real: `MqttClientTransport.subscribe` completes on the broker's SUBACK
+     (`onSubscribed`), throws `SubscriptionException` on a refusal
+     (`onSubscribeFail`), and `ConnectionException` if the connection ends
+     first (`_cleanUp`). A filter already confirmed on this connection
+     completes at once, and one already requested waits for that same
+     answer: `mqtt_client` sends no second request for either, so no
+     second SUBACK would come.
 4. `cancel()` → `_removeListener` → `SubscriptionRegistry.remove`. The
    **last** listener unsubscribes.
 

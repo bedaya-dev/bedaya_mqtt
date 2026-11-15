@@ -47,7 +47,13 @@ abstract interface class MqttTransport {
 
   /// Starts receiving messages that match [filter] on [messages].
   ///
-  /// Throws a `ConnectionException` if not connected.
+  /// Completes when the broker has accepted the subscription, not when the
+  /// request is sent. Subscribing again to a filter already accepted on
+  /// this connection completes at once.
+  ///
+  /// Throws a `SubscriptionException` if the broker refuses it, and a
+  /// `ConnectionException` if not connected or if the connection ends
+  /// before the broker answers.
   Future<void> subscribe(String filter, Qos qos);
 
   /// Stops receiving messages for [filter].

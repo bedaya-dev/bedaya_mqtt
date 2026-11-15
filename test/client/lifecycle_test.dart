@@ -65,7 +65,14 @@ class GatedTransport implements MqttTransport {
   @override
   Future<void> subscribe(String filter, Qos qos) async {
     final g = subscribeGate;
-    if (g != null) await g.future;
+    if (g != null) {
+      // Like a broker slow to send its SUBACK. If the connection ends
+      // first, give up, as MqttClientTransport does in _cleanUp.
+      final ended = inner.states.firstWhere(
+        (s) => s == TransportState.disconnected,
+      );
+      await Future.any([g.future, ended]);
+    }
     await inner.subscribe(filter, qos);
   }
 
@@ -342,5 +349,66 @@ void main() {
         await client.disconnect();
       },
     );
+  });
+
+  group('the broker is slow to confirm the restored subscriptions', () {
+    test('a command waits until they are confirmed', () async {
+      // A device on its own connection, answering commands.
+      final device = BedayaClient(
+        const ClientConfig(host: 'memory'),
+        transport: MemoryTransport(broker),
+      );
+      final me = device.asDevice('a1');
+      await device.connect();
+      final got = <Command>[];
+      me.commands.listen((c) {
+        got.add(c);
+        me.ack(c);
+      });
+
+      client.subscribe(BedayaTopics.telemetry).listen((_) {});
+      await client.connect();
+
+      transport.subscribeGate = Completer(); // SUBACKs held back
+      transport.inner.drop();
+      await client.connectionStates.firstWhere((s) => s is Connected);
+
+      final sending = client
+          .device('a1')
+          .send(Command.relay(on: true), timeout: const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(got, isEmpty, reason: 'not sent before the confirmations');
+
+      transport.subscribeGate!.complete(); // the broker answers
+      final ack = await sending;
+      expect(ack.ok, isTrue);
+      expect(got, hasLength(1));
+      await device.close();
+    });
+
+    test('a drop while waiting ends that restore; the next one '
+        'completes', () async {
+      final errors = <BedayaException>[];
+      client.errors.listen(errors.add);
+      client.subscribe(BedayaTopics.telemetry).listen((_) {});
+      await client.connect();
+
+      transport.subscribeGate = Completer(); // never answered
+      transport.inner.drop();
+      await client.connectionStates.firstWhere((s) => s is Connected);
+      await pumpEventQueue();
+
+      transport.subscribeGate = null;
+      transport.inner.drop(); // drops again while waiting for the SUBACK
+      await client.connectionStates.firstWhere((s) => s is Connected);
+      await pumpEventQueue();
+
+      expect(transport.inner.subscriptions.keys, ['bedaya/+/telemetry']);
+      expect(
+        errors.whereType<SubscriptionException>(),
+        isEmpty,
+        reason: 'a drop is not a refusal',
+      );
+    });
   });
 }

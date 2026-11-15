@@ -134,6 +134,10 @@ class BedayaClient {
   /// it (see [_retryFirstConnect]). Includes sending the queue.
   Future<void>? _restoring;
 
+  /// Whether a connect has succeeded before, to tell a
+  /// [SubscriptionException] after a reconnect from one on the first connect.
+  bool _connectedBefore = false;
+
   /// Completes once the latest connect has restored the subscriptions and,
   /// as a device, published "online"; before the queue is sent. Commands
   /// wait for this, not for the queue ([_publishBefore]), and so does
@@ -289,15 +293,22 @@ class BedayaClient {
     _setState(const Connected());
     try {
       // Clean session: the broker forgot our subscriptions, so restore
-      // them first, before anything can be missed.
+      // them first, before anything can be missed. All requests go out at
+      // once; then we wait until the broker has answered every one. A
+      // refused one is reported and the others carry on; a dropped
+      // connection ends the restore (the next reconnect starts it again).
+      final context = _connectedBefore
+          ? SubscriptionContext.reconnect
+          : SubscriptionContext.firstConnect;
+      _connectedBefore = true;
       final filters = _registry.filters;
       if (filters.isNotEmpty) {
         _log(BedayaLogLevel.debug, 'restoring ${filters.length} subscriptions');
       }
-      for (final MapEntry(key: filter, value: qos) in filters.entries) {
-        _log(BedayaLogLevel.debug, 'subscribe $filter (${qos.name})');
-        await _transport.subscribe(filter, qos);
-      }
+      await Future.wait([
+        for (final MapEntry(key: filter, value: qos) in filters.entries)
+          _subscribe(filter, qos, context),
+      ]);
 
       final endpoint = _endpoint;
       if (endpoint != null) {
@@ -723,6 +734,12 @@ class BedayaClient {
   /// The subscription starts when the stream is listened to (even before
   /// [connect]) and ends when it is cancelled. Messages that fail to
   /// decode are skipped and reported on [errors].
+  ///
+  /// If the broker answers the subscription with a failure code (some
+  /// brokers do for an ACL refusal; Mosquitto doesn't), a
+  /// [SubscriptionException] is reported on [errors] and the stream simply
+  /// gets nothing; it never gets an error event. The client asks again
+  /// after every reconnect, so fixing the ACL is enough.
   Stream<TopicMessage<T>> subscribe<T>(
     Topic<T> topic, {
     Map<String, String> params = const {},
@@ -780,10 +797,30 @@ class BedayaClient {
   void _addListener(String filter, Qos qos) {
     final subscribeWith = _registry.add(filter, qos);
     if (subscribeWith != null && _state is Connected) {
-      _log(BedayaLogLevel.debug, 'subscribe $filter (${subscribeWith.name})');
-      _transport
-          .subscribe(filter, subscribeWith)
-          .catchError((Object e) => _reportError('subscribe', filter, e));
+      unawaited(
+        _subscribe(
+          filter,
+          subscribeWith,
+          SubscriptionContext.newListener,
+        ).catchError((Object e) => _reportError('subscribe', filter, e)),
+      );
+    }
+  }
+
+  /// Subscribes and waits for the broker's answer. A refusal is reported
+  /// on [errors] as a [SubscriptionException] and does not throw: the
+  /// filter stays registered, so the next reconnect asks again. Anything
+  /// else (the connection dropped) is thrown.
+  Future<void> _subscribe(
+    String filter,
+    Qos qos,
+    SubscriptionContext context,
+  ) async {
+    _log(BedayaLogLevel.debug, 'subscribe $filter (${qos.name})');
+    try {
+      await _transport.subscribe(filter, qos);
+    } on SubscriptionException catch (e) {
+      _error(e.withContext(context));
     }
   }
 

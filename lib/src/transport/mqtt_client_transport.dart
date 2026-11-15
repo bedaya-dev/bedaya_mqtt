@@ -46,6 +46,10 @@ class MqttClientTransport implements MqttTransport {
       // OS gave up, which takes many minutes. Now a ping with no answer
       // within one more keepAlive ends the connection, and we reconnect.
       ..disconnectOnNoResponsePeriod = _client.keepAlivePeriod
+      // Kept across connects: mqtt_client hands them to the subscriptions
+      // manager it makes on every connect.
+      ..onSubscribed = _onSubscribed
+      ..onSubscribeFail = _onSubscribeFail
       ..onDisconnected = _onDisconnected;
   }
 
@@ -64,6 +68,16 @@ class MqttClientTransport implements MqttTransport {
   /// by the broker, by message id. Completed by [_onAck], failed by
   /// [_cleanUp] if the connection ends first.
   final Map<int, Completer<void>> _pendingAcks = {};
+
+  /// Subscriptions requested on this connection and not yet answered by
+  /// the broker, by filter. Completed by [_onSubscribed], failed by
+  /// [_onSubscribeFail], or by [_cleanUp] if the connection ends first.
+  final Map<String, Completer<void>> _pendingSubscribes = {};
+
+  /// The filter being handed to `mqtt_client.subscribe` right now. It calls
+  /// `onSubscribeFail` synchronously when it can't even send the request;
+  /// that is not the broker saying no.
+  String? _requesting;
 
   @override
   TransportState get state => _state;
@@ -166,13 +180,69 @@ class MqttClientTransport implements MqttTransport {
     _cleanUp();
   }
 
+  /// Subscribes to [filter]. Completes when the broker confirms it
+  /// (SUBACK), not when the request is sent.
+  ///
+  /// Throws a [SubscriptionException] if the broker refuses it (SUBACK
+  /// 0x80) or it can't be requested, and a
+  /// [ConnectionException] if the connection ends before the answer.
   @override
   Future<void> subscribe(String filter, Qos qos) async {
     _checkConnected();
     checkTopicFilter(filter);
-    if (_client.subscribe(filter, _toMqttQos(qos)) == null) {
-      throw ConnectionException('Could not subscribe to "$filter"');
+
+    // Already asked on this connection: wait for that same answer.
+    // mqtt_client would not send a second request, so no second SUBACK
+    // would ever come.
+    final waiting = _pendingSubscribes[filter];
+    if (waiting != null) return waiting.future;
+
+    // Already confirmed on this connection: nothing to send or wait for.
+    // (mqtt_client keeps the first QoS for a filter; see the class docs.)
+    if (_client.getSubscriptionsStatus(filter) ==
+        mqtt.MqttSubscriptionStatus.active) {
+      return;
     }
+
+    mqtt.Subscription? sent;
+    Object? error;
+    _requesting = filter;
+    try {
+      sent = _client.subscribe(filter, _toMqttQos(qos));
+    } on Exception catch (e) {
+      error = e;
+    } finally {
+      _requesting = null;
+    }
+    if (sent == null) {
+      throw SubscriptionException(
+        filter,
+        'the request could not be sent',
+        cause: error,
+      );
+    }
+
+    // The broker's answer can't come before we return to the event loop,
+    // so registering now misses nothing.
+    final answer = Completer<void>();
+    _pendingSubscribes[filter] = answer;
+    return answer.future;
+  }
+
+  void _onSubscribed(String topic) {
+    _pendingSubscribes.remove(topic)?.complete();
+  }
+
+  void _onSubscribeFail(String topic) {
+    // Sending failed inside mqtt_client: subscribe() reports that itself.
+    if (topic == _requesting) return;
+    _failSubscribe(topic, 'rejected by the broker');
+  }
+
+  void _failSubscribe(String filter, String reason) {
+    _pendingSubscribes
+        .remove(filter)
+        ?.completeError(SubscriptionException(filter, reason));
   }
 
   @override
@@ -264,6 +334,17 @@ class MqttClientTransport implements MqttTransport {
       ack.completeError(
         const ConnectionException(
           'Connection ended before the broker confirmed the message',
+        ),
+      );
+    }
+    // Likewise for subscriptions the broker never answered. The client
+    // asks again after the reconnect.
+    final unanswered = _pendingSubscribes.values.toList();
+    _pendingSubscribes.clear();
+    for (final answer in unanswered) {
+      answer.completeError(
+        const ConnectionException(
+          'Connection ended before the broker answered the subscription',
         ),
       );
     }

@@ -1,3 +1,25 @@
+## Unreleased
+
+- **Refused subscriptions are reported.** If the broker refuses a
+  subscription (answers with SUBACK 0x80), a new `SubscriptionException`
+  goes to `client.errors`, with the filter, the reason, and the `context`:
+  first connect, reconnect, or a new listener. Before, the stream silently
+  got nothing. The stream itself never gets an error event. The client asks
+  again after every reconnect, so fixing the ACL is enough. Mosquitto
+  (checked with 2.1.2) accepts a subscription its ACL refuses and drops the
+  messages instead, so there is nothing to report there.
+- **Subscriptions wait for the broker's answer (SUBACK).** After a
+  reconnect, commands wait until every restored subscription is confirmed
+  or refused, not just requested. The restore sends all requests at once
+  and then waits, instead of one round trip per subscription.
+- `MqttTransport.subscribe` now completes on the broker's answer and
+  throws `SubscriptionException` on a refusal. Custom transports should
+  do the same.
+- Testing: `MemoryBroker.rejectSubscription` refuses chosen filters, like
+  an ACL.
+- 0.2.0 was tagged in git but never published on pub.dev; 0.2.1 contains
+  everything listed under it.
+
 ## 0.2.1
 
 - Works with Dart 3.8 and later (was 3.13), so Flutter projects on older

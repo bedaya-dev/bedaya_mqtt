@@ -18,7 +18,9 @@ import 'topic_filter.dart';
 /// ```
 ///
 /// It supports `+`/`#` filters, retained messages and last wills. Use
-/// [stop] and [start] to test what happens when the broker goes away.
+/// [stop] and [start] to test what happens when the broker goes away, and
+/// [rejectSubscription] to test a broker whose access control refuses a
+/// subscription.
 class MemoryBroker {
   /// Creates a running broker with no clients and no retained messages.
   MemoryBroker();
@@ -35,6 +37,15 @@ class MemoryBroker {
 
   /// How many transports are connected.
   int get clientCount => _clients.length;
+
+  /// Decides which subscriptions the broker refuses, like an ACL that
+  /// doesn't let a login read a topic. Gets the full filter; return true to
+  /// refuse it. Null (the default) accepts everything.
+  ///
+  /// ```dart
+  /// broker.rejectSubscription = (filter) => filter.endsWith('/secret');
+  /// ```
+  bool Function(String filter)? rejectSubscription;
 
   /// Simulates the broker going down.
   ///
@@ -139,6 +150,9 @@ class MemoryTransport implements MqttTransport {
   Future<void> subscribe(String filter, Qos qos) async {
     _checkConnected();
     checkTopicFilter(filter);
+    if (broker.rejectSubscription?.call(filter) ?? false) {
+      throw SubscriptionException(filter, 'rejected by the broker');
+    }
     _subscriptions[filter] = qos;
 
     // A real broker sends retained messages after the subscribe completes,

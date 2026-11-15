@@ -1,0 +1,8 @@
+# Access control for the login listener (port 1884, user bedaya).
+# Only the contract topics are allowed, so a test can subscribe to
+# anything else and check that the refusal is reported.
+user bedaya
+topic readwrite +/+/telemetry
+topic readwrite +/+/status
+topic readwrite +/+/command
+topic readwrite +/+/command/ack

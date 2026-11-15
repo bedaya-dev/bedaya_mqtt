@@ -113,6 +113,13 @@ two terminals.
   purpose). For your own data that must arrive, use a topic with QoS 1 and
   `OfflinePolicy.queue`, which is what `Topic.json` gives you by default.
   See [Delivery guarantees](#delivery-guarantees).
+- **A stream that gets nothing, with an ACL on the broker.** Brokers
+  handle a subscription their ACL refuses in two ways. Some answer with a
+  failure code (SUBACK 0x80); that is reported on `client.errors` as a
+  `SubscriptionException`. **Mosquitto accepts the subscription and then
+  silently drops its messages**, so the client can't tell; the stream just
+  gets nothing. If a stream stays silent, check the broker's ACL and its
+  log first.
 - **One client acting as several devices.** A client can be only one
   device (`asDevice`), because the Last Will is per connection. A gateway
   for several boards needs one client per board.
@@ -298,6 +305,9 @@ For real devices:
   ```
 
 - **Limit each login to its own topics** with the broker's access control.
+  A refused subscription is reported on `client.errors` only if the
+  broker answers with a failure code; Mosquitto doesn't (see Common
+  mistakes).
   With Mosquitto, an `acl_file` like this lets each device (logged in with
   its device id as username) use only its own topics, and the app use all
   of them (shown with the default prefix, `bedaya`):
@@ -390,7 +400,7 @@ through the files, and lists where to look for common problems.
 | `connect()` | `ConnectionException`: broker unreachable, or refused (for example `notAuthorized`), or `disconnect()` was called before it finished |
 | `publish()` | `ConnectionException` while offline, for a topic with `OfflinePolicy.fail` or with the queue turned off (`maxQueueSize: 0`). `PublishDeadlineException` when a `deadline` passes. `ArgumentError` for a missing or invalid param |
 | `send()` | `CommandTimeoutException` when the command could not be sent, or no ack arrived, within its timeout (10s by default). The outcome is then unknown, see [Delivery guarantees](#delivery-guarantees) |
-| `client.errors` | `DecodeException` for payloads that don't decode, `MessageDroppedException` when the queue is full |
+| `client.errors` | `DecodeException` for payloads that don't decode, `MessageDroppedException` when the queue is full, `SubscriptionException` when the broker refuses a subscription (with the filter, the reason, and whether it was the first connect, a reconnect or a new listener) |
 
 Every exception from the package extends `BedayaException`, except
 `ArgumentError`, which means a mistake in the calling code.

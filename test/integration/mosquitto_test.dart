@@ -158,6 +158,90 @@ void main() {
         expect(bad.connectionState, isA<Failed>());
       });
 
+      test('ACL on Mosquitto: a refused subscription looks accepted and its '
+          'messages never arrive (a known broker limit)', () async {
+        // tool/mosquitto/acl lets user "bedaya" use only the contract
+        // topics on this port. Mosquitto (checked with 2.1.2) still grants
+        // a subscription to anything else (SUBACK QoS 0, not 0x80) and then
+        // drops its messages, so the client has nothing to report. If this
+        // test starts failing, Mosquitto changed: update the README
+        // ("Common mistakes") and SubscriptionException's docs.
+        final secret = Topic.json(
+          '{deviceId}/secret',
+          fromJson: Telemetry.fromJson,
+          toJson: (t) => t.toJson(),
+        );
+        final c = make(port: authPort, username: 'bedaya', password: 'secret');
+        final errors = <BedayaException>[];
+        c.errors.listen(errors.add);
+        final secrets = <Telemetry>[];
+        c
+            .subscribe(secret, params: {'deviceId': 's1'})
+            .listen((m) => secrets.add(m.value));
+        final telemetry = <Telemetry>[];
+        c
+            .subscribe(BedayaTopics.telemetry, params: {'deviceId': 's1'})
+            .listen((m) => telemetry.add(m.value));
+        await within(c.connect());
+
+        // An anonymous client on the open port publishes both. Topics are
+        // shared across listeners; only the subscriber's ACL differs.
+        final pub = make();
+        await within(pub.connect());
+        await pub.publish(
+          secret,
+          const Telemetry({'n': 1}),
+          params: {'deviceId': 's1'},
+        );
+        await pub.publish(
+          BedayaTopics.telemetry,
+          const Telemetry({'n': 2}),
+          params: {'deviceId': 's1'},
+        );
+        await until(() => telemetry.isNotEmpty);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+
+        print('  errors: $errors, secret messages: $secrets');
+        expect(errors.whereType<SubscriptionException>(), isEmpty);
+        expect(secrets, isEmpty, reason: 'the ACL blocks delivery');
+      });
+
+      test('the same filter again at a higher QoS: no second request, no '
+          'hang, both streams get messages', () async {
+        Topic<Telemetry> dup(Qos qos) => Topic.json(
+          '{deviceId}/dup',
+          fromJson: Telemetry.fromJson,
+          toJson: (t) => t.toJson(),
+          qos: qos,
+        );
+        final c = make();
+        final errors = <BedayaException>[];
+        c.errors.listen(errors.add);
+        await within(c.connect());
+        final low = <Object?>[];
+        final high = <Object?>[];
+        c
+            .subscribe(dup(Qos.atMostOnce), params: {'deviceId': 'd1'})
+            .listen((m) => low.add(m.value));
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        // Already confirmed: the transport must not wait for a SUBACK that
+        // mqtt_client will never ask for.
+        c
+            .subscribe(dup(Qos.atLeastOnce), params: {'deviceId': 'd1'})
+            .listen((m) => high.add(m.value));
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+
+        final pub = make();
+        await within(pub.connect());
+        await pub.publish(
+          dup(Qos.atLeastOnce),
+          const Telemetry({'n': 1}),
+          params: {'deviceId': 'd1'},
+        );
+        await until(() => low.isNotEmpty && high.isNotEmpty);
+        expect(errors, isEmpty);
+      });
+
       test('WebSocket: messages go through', () async {
         final ws = make(port: wsPort, webSocket: true);
         await within(ws.connect());

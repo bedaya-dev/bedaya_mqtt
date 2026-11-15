@@ -72,6 +72,68 @@ class CommandTimeoutException extends BedayaException {
   const CommandTimeoutException(super.message, [super.cause]);
 }
 
+/// The broker did not accept a subscription, or it could not be requested.
+///
+/// Reported on `client.errors`, never on the stream that listens to the
+/// topic: that stream simply gets no messages for it.
+///
+/// Only reported when the broker answers the subscription with a failure
+/// code (SUBACK 0x80). Not every broker does that for an ACL refusal:
+/// Mosquitto (checked with 2.1.2) accepts the subscription and silently
+/// drops its messages, which the client can't see.
+///
+/// The client keeps the subscription and asks again after every
+/// reconnect, so fixing the ACL on the broker is enough; there is no need
+/// to listen again.
+class SubscriptionException extends BedayaException {
+  /// Creates the exception. Transports leave [context] out; the client
+  /// fills it in before reporting it on `client.errors`.
+  SubscriptionException(this.filter, this.reason, {this.context, Object? cause})
+    : super(_describe(filter, reason, context), cause);
+
+  /// The full topic filter, with the prefix, like `bedaya/a1/command`.
+  final String filter;
+
+  /// Why, in words: "rejected by the broker", or why the request could not
+  /// be sent.
+  final String reason;
+
+  /// When the subscription was being made. Null when thrown by a
+  /// transport, before the client adds it.
+  final SubscriptionContext? context;
+
+  /// The same exception, with [context] filled in.
+  SubscriptionException withContext(SubscriptionContext context) =>
+      SubscriptionException(filter, reason, context: context, cause: cause);
+
+  static String _describe(
+    String filter,
+    String reason,
+    SubscriptionContext? context,
+  ) {
+    final when = switch (context) {
+      null => '',
+      SubscriptionContext.firstConnect => ' (first connect)',
+      SubscriptionContext.reconnect => ' (after a reconnect)',
+      SubscriptionContext.newListener => ' (new listener)',
+    };
+    return 'Subscription to "$filter" failed$when: $reason';
+  }
+}
+
+/// When a [SubscriptionException] happened.
+enum SubscriptionContext {
+  /// Restoring the subscriptions of streams that were listened to before
+  /// the first successful connect.
+  firstConnect,
+
+  /// Restoring every subscription after the connection came back.
+  reconnect,
+
+  /// A stream started listening while connected.
+  newListener,
+}
+
 /// A payload could not be turned into the expected message type.
 ///
 /// Happens when the bytes are not valid UTF-8 JSON, are not a JSON object,
