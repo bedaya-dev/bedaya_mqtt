@@ -256,11 +256,8 @@ void main() {
       spy.messages.listen((m) => wire.add(utf8.decode(m.payload)));
     });
 
-    Future<void> publishN(BedayaClient c, int n) => c.publish(
-      reading,
-      Telemetry({'n': n}),
-      params: {'deviceId': 'a1'},
-    );
+    Future<void> publishN(BedayaClient c, int n) =>
+        c.publish(reading, Telemetry({'n': n}), params: {'deviceId': 'a1'});
 
     test('messages published while offline are sent after reconnect', () async {
       await client.connect();

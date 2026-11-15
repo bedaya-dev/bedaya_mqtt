@@ -159,86 +159,95 @@ void main() {
         ? false
         : 'Run tool/mosquitto.sh start, then BEDAYA_MOSQUITTO=1 dart test',
     () {
-      test('the client itself notices when the broker stops answering', () async {
-        final device = make(port: proxyPort);
-        await within(device.connect());
+      test(
+        'the client itself notices when the broker stops answering',
+        () async {
+          final device = make(port: proxyPort);
+          await within(device.connect());
 
-        final states = <MqttConnectionState>[];
-        device.connectionStates.listen(states.add);
+          final states = <MqttConnectionState>[];
+          device.connectionStates.listen(states.add);
 
-        final cutAt = DateTime.now();
-        await cutDownstream();
-        try {
-          // keepAlive is 2s. A dead link should show up well before 10s.
-          await within(
-            device.connectionStates.firstWhere((s) => s is! Connected),
-            10,
+          final cutAt = DateTime.now();
+          await cutDownstream();
+          try {
+            // keepAlive is 2s. A dead link should show up well before 10s.
+            await within(
+              device.connectionStates.firstWhere((s) => s is! Connected),
+              10,
+            );
+          } on TimeoutException {
+            fail(
+              'Still "Connected" 10s after the network was cut, with a '
+              'keepAlive of ${keepAlive.inSeconds}s. States: $states',
+            );
+          }
+          print('  noticed after ${DateTime.now().difference(cutAt)}');
+        },
+      );
+
+      test(
+        'QoS 1 messages published during a silent drop are not lost',
+        () async {
+          // The controller is connected straight to the broker; only the
+          // device's link goes bad.
+          final controller = make(port: directPort);
+          await within(controller.connect());
+          final got = <int>[];
+          controller
+              .subscribe(numbered, params: {'deviceId': 'd1'})
+              .listen((m) => got.add(m.value['n'] as int));
+
+          final device = make(port: proxyPort);
+          await within(device.connect());
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+
+          Future<void> send(int n) => device.publish(
+            numbered,
+            Telemetry({'n': n}),
+            params: {'deviceId': 'd1'},
           );
-        } on TimeoutException {
-          fail(
-            'Still "Connected" 10s after the network was cut, with a '
-            'keepAlive of ${keepAlive.inSeconds}s. States: $states',
+
+          await send(1);
+          await until(() => got.contains(1));
+
+          await cutNetwork();
+          // The device can't know yet: these look sent.
+          await send(2);
+          await send(3);
+          print(
+            '  after the cut: ${device.connectionState}, '
+            '${device.queuedMessages} queued',
           );
-        }
-        print('  noticed after ${DateTime.now().difference(cutAt)}');
-      });
 
-      test('QoS 1 messages published during a silent drop are not lost', () async {
-        // The controller is connected straight to the broker; only the
-        // device's link goes bad.
-        final controller = make(port: directPort);
-        await within(controller.connect());
-        final got = <int>[];
-        controller
-            .subscribe(numbered, params: {'deviceId': 'd1'})
-            .listen((m) => got.add(m.value['n'] as int));
+          // Leave the link dead for a few keepAlives, then bring it back.
+          await Future<void>.delayed(keepAlive * 3);
+          await restoreNetwork();
+          await within(connected(device), 20);
 
-        final device = make(port: proxyPort);
-        await within(device.connect());
-        await Future<void>.delayed(const Duration(milliseconds: 300));
+          await send(4);
+          try {
+            await until(() => got.contains(4), 10);
+          } on TimeoutException {
+            // Keep going: the assertion below says what is missing.
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 500));
 
-        Future<void> send(int n) => device.publish(
-          numbered,
-          Telemetry({'n': n}),
-          params: {'deviceId': 'd1'},
-        );
-
-        await send(1);
-        await until(() => got.contains(1));
-
-        await cutNetwork();
-        // The device can't know yet: these look sent.
-        await send(2);
-        await send(3);
-        print('  after the cut: ${device.connectionState}, '
-            '${device.queuedMessages} queued');
-
-        // Leave the link dead for a few keepAlives, then bring it back.
-        await Future<void>.delayed(keepAlive * 3);
-        await restoreNetwork();
-        await within(connected(device), 20);
-
-        await send(4);
-        try {
-          await until(() => got.contains(4), 10);
-        } on TimeoutException {
-          // Keep going: the assertion below says what is missing.
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 500));
-
-        print('  controller got: $got');
-        expect(
-          got.toSet(),
-          containsAll(<int>[1, 2, 3, 4]),
-          reason: 'QoS 1 messages must arrive at least once',
-        );
-        // QoS 1 may deliver a message twice, so compare first arrivals.
-        expect(
-          got.toSet().toList(),
-          [1, 2, 3, 4],
-          reason: 'messages must arrive in the order they were published',
-        );
-      });
+          print('  controller got: $got');
+          expect(
+            got.toSet(),
+            containsAll(<int>[1, 2, 3, 4]),
+            reason: 'QoS 1 messages must arrive at least once',
+          );
+          // QoS 1 may deliver a message twice, so compare first arrivals.
+          expect(got.toSet().toList(), [
+            1,
+            2,
+            3,
+            4,
+          ], reason: 'messages must arrive in the order they were published');
+        },
+      );
 
       test('disconnect() publishes offline exactly once', () async {
         // Several rounds, because the duplicate depends on timing.
@@ -259,11 +268,10 @@ void main() {
           await Future<void>.delayed(const Duration(milliseconds: 1500));
 
           print('  round $round: $statuses');
-          expect(
-            statuses,
-            [true, false],
-            reason: 'round $round: one online, then exactly one offline',
-          );
+          expect(statuses, [
+            true,
+            false,
+          ], reason: 'round $round: one online, then exactly one offline');
         }
       });
     },

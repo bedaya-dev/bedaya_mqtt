@@ -305,18 +305,20 @@ void main() {
       expect(wire, isEmpty);
     });
 
-    test('drop also applies when the connection drops during publish',
-        () async {
-      await client.connect();
-      transport.drop();
-      await client.publish(
-        topic(OfflinePolicy.drop),
-        const Telemetry({'n': 1}),
-        params: {'deviceId': 'a1'},
-      );
-      expect(client.queuedMessages, 0);
-      await client.disconnect(); // stop the reconnect timer
-    });
+    test(
+      'drop also applies when the connection drops during publish',
+      () async {
+        await client.connect();
+        transport.drop();
+        await client.publish(
+          topic(OfflinePolicy.drop),
+          const Telemetry({'n': 1}),
+          params: {'deviceId': 'a1'},
+        );
+        expect(client.queuedMessages, 0);
+        await client.disconnect(); // stop the reconnect timer
+      },
+    );
 
     test('the standard topics', () {
       expect(BedayaTopics.telemetry.offline, OfflinePolicy.drop);
@@ -325,17 +327,19 @@ void main() {
       expect(BedayaTopics.commandAck.offline, OfflinePolicy.queue);
     });
 
-    test('telemetry published offline is not replayed after a reconnect',
-        () async {
-      await client.publish(
-        BedayaTopics.telemetry,
-        const Telemetry({'temp': 20}),
-        params: {'deviceId': 'a1'},
-      );
-      await client.connect();
-      await pumpEventQueue();
-      expect(wire, isEmpty);
-    });
+    test(
+      'telemetry published offline is not replayed after a reconnect',
+      () async {
+        await client.publish(
+          BedayaTopics.telemetry,
+          const Telemetry({'temp': 20}),
+          params: {'deviceId': 'a1'},
+        );
+        await client.connect();
+        await pumpEventQueue();
+        expect(wire, isEmpty);
+      },
+    );
   });
 
   group('publish with a deadline', () {
