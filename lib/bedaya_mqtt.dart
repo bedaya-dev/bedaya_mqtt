@@ -34,7 +34,8 @@
 /// For tests without a network, see `package:bedaya_mqtt/testing.dart`.
 library;
 
-export 'src/client/bedaya_client.dart';
+export 'src/client/bedaya_client.dart'
+    hide onClientClose, publishAfterSubscribed;
 export 'src/client/bedaya_log.dart';
 export 'src/client/client_config.dart';
 export 'src/client/mqtt_connection_state.dart';

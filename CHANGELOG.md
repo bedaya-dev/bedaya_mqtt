@@ -12,6 +12,18 @@
   reconnect, commands wait until every restored subscription is confirmed
   or refused, not just requested. The restore sends all requests at once
   and then waits, instead of one round trip per subscription.
+- **`send()` waits for its ack subscription.** Fixed a race: a command
+  could go out before the broker had confirmed the subscription to its
+  ack topic, so a fast ack could be missed. Now `send()` waits for that
+  SUBACK first. If the broker refuses it, `send()` throws
+  `SubscriptionException` at once and the command is not sent. The ack
+  subscription is kept per device after the first command (until
+  `close()`), so later commands don't wait for it again.
+- `SubscriptionException` docs: how to tell a refusal (`reason`
+  "rejected by the broker") from a request that could not be sent
+  (`cause` set). `client.errors` docs list it.
+- Tests: a raw MQTT stub server checks that a real SUBACK 0x80 reaches
+  `MqttClientTransport` and `client.errors` (no Docker needed).
 - `MqttTransport.subscribe` now completes on the broker's answer and
   throws `SubscriptionException` on a refusal. Custom transports should
   do the same.

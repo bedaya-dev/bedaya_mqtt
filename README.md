@@ -105,6 +105,13 @@ two terminals.
 - **Not answering a command.** Every command needs `ack(command)`, even a
   failed one (`ack(command, error: ...)`), or `send` waits until its
   timeout.
+- **A command to a device whose ack topic you may not read.** `send()`
+  first subscribes to the device's ack topic and waits until the broker
+  confirms it, so the ack can't be missed. If the broker refuses that
+  subscription, `send()` throws `SubscriptionException` at once and the
+  command is **not** sent. (Mosquitto accepts it instead, see "A stream
+  that gets nothing" below, so there the command goes out and `send()`
+  times out.)
 - **Device ids with `/`, `+` or `#`.** They are MQTT topic levels and
   wildcards, so they are rejected. Use letters, digits, `-` and `_`.
 - **Expecting every message to survive a dropped connection.** Two things
@@ -215,7 +222,12 @@ goes away:
 | Arrives | At most once. | **At least once** while it stays in the queue: possibly twice. |
 
 Commands are different: `send()` never queues them (see
-[Offline queue](#offline-queue)).
+[Offline queue](#offline-queue)). Before a command goes out, `send()`
+waits until the broker has confirmed the subscription to its ack topic
+(SUBACK), on the current connection, so a fast ack is never missed. That
+subscription is made on the first command to a device and kept until the
+client is closed, so later commands don't wait for it. If the broker
+refuses it, `send()` throws `SubscriptionException` and sends nothing.
 
 - **"At least once" has limits.** A queued message is sent again until
   the broker confirms it, as long as it is still in the queue and the
@@ -399,7 +411,7 @@ through the files, and lists where to look for common problems.
 |---|---|
 | `connect()` | `ConnectionException`: broker unreachable, or refused (for example `notAuthorized`), or `disconnect()` was called before it finished |
 | `publish()` | `ConnectionException` while offline, for a topic with `OfflinePolicy.fail` or with the queue turned off (`maxQueueSize: 0`). `PublishDeadlineException` when a `deadline` passes. `ArgumentError` for a missing or invalid param |
-| `send()` | `CommandTimeoutException` when the command could not be sent, or no ack arrived, within its timeout (10s by default). The outcome is then unknown, see [Delivery guarantees](#delivery-guarantees) |
+| `send()` | `CommandTimeoutException` when the command could not be sent, or no ack arrived, within its timeout (10s by default). The outcome is then unknown, see [Delivery guarantees](#delivery-guarantees). `SubscriptionException` when the broker refuses the ack subscription; the command was then not sent |
 | `client.errors` | `DecodeException` for payloads that don't decode, `MessageDroppedException` when the queue is full, `SubscriptionException` when the broker refuses a subscription (with the filter, the reason, and whether it was the first connect, a reconnect or a new listener) |
 
 Every exception from the package extends `BedayaException`, except

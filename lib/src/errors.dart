@@ -75,12 +75,26 @@ class CommandTimeoutException extends BedayaException {
 /// The broker did not accept a subscription, or it could not be requested.
 ///
 /// Reported on `client.errors`, never on the stream that listens to the
-/// topic: that stream simply gets no messages for it.
+/// topic: that stream simply gets no messages for it. `DeviceRemote.send`
+/// also throws it when its ack subscription fails, and then does not send
+/// the command.
 ///
-/// Only reported when the broker answers the subscription with a failure
-/// code (SUBACK 0x80). Not every broker does that for an ACL refusal:
-/// Mosquitto (checked with 2.1.2) accepts the subscription and silently
-/// drops its messages, which the client can't see.
+/// Two cases, told apart by [reason] (and [cause]):
+///
+/// - **The broker refused it**: it answered with a failure code (SUBACK
+///   0x80). [reason] is `"rejected by the broker"` and [cause] is null.
+///   Usually the broker's access control.
+/// - **The request could not be sent**: `mqtt_client` failed to send the
+///   SUBSCRIBE. [reason] is `"the request could not be sent"` and [cause]
+///   holds the underlying error, if there was one.
+///
+/// A connection that ends before the broker answers is neither: that is a
+/// `ConnectionException`, and the client simply asks again after the
+/// reconnect.
+///
+/// Not every broker answers an ACL refusal with a failure code: Mosquitto
+/// (checked with 2.1.2) accepts the subscription and silently drops its
+/// messages, which the client can't see.
 ///
 /// The client keeps the subscription and asks again after every
 /// reconnect, so fixing the ACL on the broker is enough; there is no need
