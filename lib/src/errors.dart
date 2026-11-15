@@ -44,6 +44,16 @@ class ConnectionException extends BedayaException {
   const ConnectionException(super.message, [super.cause]);
 }
 
+/// A message given a deadline (`publish(..., deadline:)`) could not be
+/// published before it, because the client was not connected.
+///
+/// The message was never queued, so it will not be sent later.
+/// `device.send()` turns this into a [CommandTimeoutException].
+class PublishDeadlineException extends ConnectionException {
+  /// Creates the exception.
+  const PublishDeadlineException(super.message, [super.cause]);
+}
+
 /// The offline queue was full, so its oldest message was thrown away.
 ///
 /// Reported on `client.errors`, not thrown. Raise

@@ -241,12 +241,141 @@ void main() {
     );
     expect(
       () => noQueue.publish(
-        BedayaTopics.telemetry,
-        const Telemetry({}),
+        BedayaTopics.commandAck, // OfflinePolicy.queue
+        CommandAck.success(Command('ping')),
         params: {'deviceId': 'a1'},
       ),
       throwsA(isA<ConnectionException>()),
     );
+  });
+
+  group('offline policy', () {
+    late List<String> wire;
+
+    setUp(() async {
+      wire = [];
+      await spy.subscribe('#', Qos.atMostOnce);
+      spy.messages.listen((m) => wire.add(m.topic));
+    });
+
+    Topic<Telemetry> topic(OfflinePolicy offline) => Topic.json(
+      '{deviceId}/reading',
+      fromJson: Telemetry.fromJson,
+      toJson: (t) => t.toJson(),
+      offline: offline,
+    );
+
+    test('queue (the default): sent after connect', () async {
+      expect(topic(OfflinePolicy.queue).offline, OfflinePolicy.queue);
+      await client.publish(
+        topic(OfflinePolicy.queue),
+        const Telemetry({'n': 1}),
+        params: {'deviceId': 'a1'},
+      );
+      expect(client.queuedMessages, 1);
+      await client.connect();
+      await pumpEventQueue();
+      expect(wire, ['bedaya/a1/reading']);
+    });
+
+    test('drop: completes, and is never sent', () async {
+      await client.publish(
+        topic(OfflinePolicy.drop),
+        const Telemetry({'n': 1}),
+        params: {'deviceId': 'a1'},
+      );
+      expect(client.queuedMessages, 0);
+      await client.connect();
+      await pumpEventQueue();
+      expect(wire, isEmpty);
+    });
+
+    test('fail: throws, and is never sent', () async {
+      await expectLater(
+        client.publish(
+          topic(OfflinePolicy.fail),
+          const Telemetry({'n': 1}),
+          params: {'deviceId': 'a1'},
+        ),
+        throwsA(isA<ConnectionException>()),
+      );
+      expect(client.queuedMessages, 0);
+      await client.connect();
+      await pumpEventQueue();
+      expect(wire, isEmpty);
+    });
+
+    test(
+      'drop also applies when the connection drops during publish',
+      () async {
+        await client.connect();
+        transport.drop();
+        await client.publish(
+          topic(OfflinePolicy.drop),
+          const Telemetry({'n': 1}),
+          params: {'deviceId': 'a1'},
+        );
+        expect(client.queuedMessages, 0);
+        await client.disconnect(); // stop the reconnect timer
+      },
+    );
+
+    test('the standard topics', () {
+      expect(BedayaTopics.telemetry.offline, OfflinePolicy.drop);
+      expect(BedayaTopics.status.offline, OfflinePolicy.drop);
+      expect(BedayaTopics.command.offline, OfflinePolicy.fail);
+      expect(BedayaTopics.commandAck.offline, OfflinePolicy.queue);
+    });
+
+    test(
+      'telemetry published offline is not replayed after a reconnect',
+      () async {
+        await client.publish(
+          BedayaTopics.telemetry,
+          const Telemetry({'temp': 20}),
+          params: {'deviceId': 'a1'},
+        );
+        await client.connect();
+        await pumpEventQueue();
+        expect(wire, isEmpty);
+      },
+    );
+  });
+
+  group('publish with a deadline', () {
+    test('offline: waits, then throws PublishDeadlineException and '
+        'never sends it', () async {
+      final wire = <String>[];
+      await spy.subscribe('#', Qos.atMostOnce);
+      spy.messages.listen((m) => wire.add(m.topic));
+
+      await expectLater(
+        client.publish(
+          BedayaTopics.commandAck,
+          CommandAck.success(Command('ping')),
+          params: {'deviceId': 'a1'},
+          deadline: DateTime.now().add(const Duration(milliseconds: 50)),
+        ),
+        throwsA(isA<PublishDeadlineException>()),
+      );
+      expect(client.queuedMessages, 0);
+      await client.connect();
+      await pumpEventQueue();
+      expect(wire, isEmpty);
+    });
+
+    test('a deadline already past throws even when connected', () async {
+      await client.connect();
+      await expectLater(
+        client.publish(
+          BedayaTopics.commandAck,
+          CommandAck.success(Command('ping')),
+          params: {'deviceId': 'a1'},
+          deadline: DateTime.now().subtract(const Duration(seconds: 1)),
+        ),
+        throwsA(isA<PublishDeadlineException>()),
+      );
+    });
   });
 
   test('device() rejects a bad id', () {

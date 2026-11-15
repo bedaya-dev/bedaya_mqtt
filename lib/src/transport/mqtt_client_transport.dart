@@ -38,6 +38,12 @@ class MqttClientTransport implements MqttTransport {
       ..websocketProtocols = const ['mqtt']
       // Reconnecting is our job (ReconnectManager), not mqtt_client's.
       ..autoReconnect = false
+      // mqtt_client sends a ping every keepAlive but, by default, never
+      // gives up when no answer comes back. On a dead link with no TCP
+      // close (lost WiFi, WiFi → 4G) that left us "connected" until the
+      // OS gave up, which takes many minutes. Now a ping with no answer
+      // within one more keepAlive ends the connection, and we reconnect.
+      ..disconnectOnNoResponsePeriod = _client.keepAlivePeriod
       ..onDisconnected = _onDisconnected;
   }
 
@@ -49,7 +55,13 @@ class MqttClientTransport implements MqttTransport {
   final StreamController<TransportState> _states = StreamController.broadcast();
   StreamSubscription<List<mqtt.MqttReceivedMessage<mqtt.MqttMessage>>>?
   _updates;
+  StreamSubscription<mqtt.MqttPublishMessage>? _acks;
   TransportState _state = TransportState.disconnected;
+
+  /// QoS 1 and 2 messages sent on this connection and not yet confirmed
+  /// by the broker, by message id. Completed by [_onAck], failed by
+  /// [_cleanUp] if the connection ends first.
+  final Map<int, Completer<void>> _pendingAcks = {};
 
   @override
   TransportState get state => _state;
@@ -106,8 +118,11 @@ class MqttClientTransport implements MqttTransport {
       );
     }
 
-    // mqtt_client makes a new updates stream on every connect.
+    // mqtt_client makes new updates and published streams on every connect.
     _updates = _client.updates?.listen(_onUpdates);
+    // `published` gets a QoS 1 message when its PUBACK arrives, and a
+    // QoS 2 message when its PUBCOMP arrives.
+    _acks = _client.published?.listen(_onAck);
     _setState(TransportState.connected);
   }
 
@@ -164,12 +179,22 @@ class MqttClientTransport implements MqttTransport {
     _client.unsubscribe(filter);
   }
 
+  /// Sends [message]. For QoS 0, completes once it is handed to the socket.
+  /// For QoS 1 and 2, completes only when the broker confirms it (PUBACK or
+  /// PUBCOMP), and throws a [ConnectionException] if the connection ends
+  /// first.
+  ///
+  /// `mqtt_client` returns as soon as the bytes are written, and forgets
+  /// unconfirmed messages when the connection ends (clean session). Waiting
+  /// here is what lets the client put such a message back in its offline
+  /// queue instead of losing it.
   @override
   Future<void> publish(RawMessage message) async {
     _checkConnected();
     checkTopicName(message.topic);
+    final int id;
     try {
-      _client.publishMessage(
+      id = _client.publishMessage(
         message.topic,
         _toMqttQos(message.qos),
         Uint8Buffer()..addAll(message.payload),
@@ -178,6 +203,19 @@ class MqttClientTransport implements MqttTransport {
     } on Exception catch (e) {
       throw ConnectionException('Could not publish to "${message.topic}"', e);
     }
+    if (message.qos == Qos.atMostOnce) return;
+
+    // Registered right after publishMessage returns, and before the event
+    // loop can deliver the broker's answer, so no ack is missed.
+    final ack = Completer<void>();
+    _pendingAcks[id] = ack;
+    await ack.future;
+  }
+
+  void _onAck(mqtt.MqttPublishMessage message) {
+    final id = message.variableHeader?.messageIdentifier;
+    if (id == null) return;
+    _pendingAcks.remove(id)?.complete();
   }
 
   void _onUpdates(List<mqtt.MqttReceivedMessage<mqtt.MqttMessage>> batch) {
@@ -214,6 +252,19 @@ class MqttClientTransport implements MqttTransport {
   void _cleanUp() {
     _updates?.cancel();
     _updates = null;
+    _acks?.cancel();
+    _acks = null;
+    // The broker never confirmed these, and mqtt_client forgets them with
+    // the connection. Fail them, so the client can queue them again.
+    final unconfirmed = _pendingAcks.values.toList();
+    _pendingAcks.clear();
+    for (final ack in unconfirmed) {
+      ack.completeError(
+        const ConnectionException(
+          'Connection ended before the broker confirmed the message',
+        ),
+      );
+    }
     if (_state != TransportState.disconnected) {
       _setState(TransportState.disconnected);
     }

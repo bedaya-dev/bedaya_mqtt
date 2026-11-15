@@ -18,32 +18,36 @@ Future<void> main() async {
   );
 
   // --- Device: publishes telemetry and answers commands. ---
-  final deviceClient = BedayaClient(config());
-  final me = deviceClient.asDevice('a1'); // before connect: sets the Last Will
-  await deviceClient.connect();
+  final fanClient = BedayaClient(config());
+  // asDevice before connect: it sets the Last Will.
+  final livingRoomFan = fanClient.asDevice('living-room-fan');
+  await fanClient.connect();
 
-  me.commands.listen((command) {
+  livingRoomFan.commands.listen((command) {
     print('device got: ${command.name} ${command.params}');
-    me.ack(command);
+    livingRoomFan.ack(command);
   });
 
   // --- Controller: watches the device and sends it a command. ---
   final controllerClient = BedayaClient(config());
   await controllerClient.connect();
-  final device = controllerClient.device('a1');
+  final livingRoomFanRemote = controllerClient.device('living-room-fan');
 
-  device.status.listen(
+  livingRoomFanRemote.status.listen(
     (s) => print('status: ${s.online ? 'online' : 'offline'}'),
   );
-  final firstReading = device.on(BedayaTopics.telemetry).first;
+  final firstReading = livingRoomFanRemote.on(BedayaTopics.telemetry).first;
 
   await Future<void>.delayed(const Duration(milliseconds: 500));
-  await me.publish(BedayaTopics.telemetry, const Telemetry({'temp': 24.5}));
+  await livingRoomFan.publish(
+    BedayaTopics.telemetry,
+    const Telemetry({'temp': 24.5}),
+  );
   print('controller got: ${await firstReading}');
 
-  final ack = await device.send(Command.relay(on: true));
+  final ack = await livingRoomFanRemote.send(Command.relay(on: true));
   print('ack: ${ack.ok ? 'ok' : ack.error}');
 
   await controllerClient.close();
-  await deviceClient.close();
+  await fanClient.close();
 }

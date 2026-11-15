@@ -4,6 +4,14 @@ import 'package:bedaya_mqtt/bedaya_mqtt.dart';
 import 'package:bedaya_mqtt/testing.dart';
 import 'package:test/test.dart';
 
+/// A topic that uses the offline queue. BedayaTopics.telemetry is dropped
+/// while offline, so the queue tests use this one.
+final reading = Topic.json(
+  '{deviceId}/reading',
+  fromJson: Telemetry.fromJson,
+  toJson: (t) => t.toJson(),
+);
+
 /// Short delays, no jitter, so the tests are fast and predictable.
 const fast = ReconnectPolicy(
   initialDelay: Duration(milliseconds: 10),
@@ -85,7 +93,7 @@ void main() {
       final patient = makeClient(retryFirstConnect: true);
       patient.subscribe(BedayaTopics.telemetry).listen((_) {});
       await patient.publish(
-        BedayaTopics.telemetry,
+        reading,
         const Telemetry({'n': 1}),
         params: {'deviceId': 'a1'},
       );
@@ -248,11 +256,8 @@ void main() {
       spy.messages.listen((m) => wire.add(utf8.decode(m.payload)));
     });
 
-    Future<void> publishN(BedayaClient c, int n) => c.publish(
-      BedayaTopics.telemetry,
-      Telemetry({'n': n}),
-      params: {'deviceId': 'a1'},
-    );
+    Future<void> publishN(BedayaClient c, int n) =>
+        c.publish(reading, Telemetry({'n': n}), params: {'deviceId': 'a1'});
 
     test('messages published while offline are sent after reconnect', () async {
       await client.connect();

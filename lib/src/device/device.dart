@@ -8,24 +8,24 @@ import '../contract/messages/device_status.dart';
 import '../errors.dart';
 import '../topic/topic.dart';
 
-/// A device seen from a controller: listen to it and send it commands.
+/// A remote for one device: watch it and send it commands.
 ///
 /// ```dart
-/// final device = client.device('a1');
-/// device.status.listen((s) => print(s.online));
-/// device.on(BedayaTopics.telemetry).listen((t) => print(t['temp']));
-/// final ack = await device.send(Command.relay(on: true));
+/// final deviceRemote = client.device('device1');
+/// deviceRemote.status.listen((s) => print(s.online));
+/// deviceRemote.on(BedayaTopics.telemetry).listen((t) => print(t['temp']));
+/// final ack = await deviceRemote.send(Command.relay(on: true));
 /// ```
 ///
 /// It is cheap to create and holds no subscriptions by itself: each stream
 /// subscribes when you listen and unsubscribes when you cancel.
-class Device {
+class DeviceRemote {
   /// Use `client.device(id)` instead.
-  Device(this._client, this.id);
+  DeviceRemote(this._client, this.id);
 
   final BedayaClient _client;
 
-  /// The device id, like `a1`.
+  /// The device id, like `device1`.
   final String id;
 
   Map<String, String> get _params => {'deviceId': id};
@@ -47,15 +47,27 @@ class Device {
   /// on `{deviceId}/command`, wait for an ack with the same id, stop
   /// listening.
   ///
+  /// [timeout] covers the whole round trip: waiting for the connection,
+  /// the broker's confirmation, and the device's ack. If the client is
+  /// offline, the command is **not** queued: it waits for the connection,
+  /// but only within [timeout]. Once this throws a
+  /// [CommandTimeoutException], the command is never sent again.
+  ///
+  /// A timeout means the outcome is **unknown**, not that nothing
+  /// happened: the command may have reached the device and only the
+  /// confirmation or the ack was late. So prefer commands that set a state
+  /// (`Command.relay(on: true)`) over ones that flip it, and let devices
+  /// ignore a [Command.id] they already handled.
+  ///
   /// Returns the ack even if it says the command failed; check
-  /// [CommandAck.ok]. Throws a [CommandTimeoutException] if no ack arrives
-  /// within [timeout], and a [ConnectionException] if offline with the
-  /// queue turned off. (With the queue on, an offline command waits in the
-  /// queue, and the timeout keeps counting.)
+  /// [CommandAck.ok]. Throws a [CommandTimeoutException] if the command
+  /// could not be sent, or no ack arrived, within [timeout], and a
+  /// [ConnectionException] if the client is closed meanwhile.
   Future<CommandAck> send(
     Command command, {
     Duration timeout = const Duration(seconds: 10),
   }) async {
+    final deadline = DateTime.now().add(timeout);
     final ack = Completer<CommandAck>();
     // Listen before publishing, so a fast answer is not missed.
     final acks = on(BedayaTopics.commandAck).listen((a) {
@@ -63,9 +75,24 @@ class Device {
     });
 
     try {
-      await _client.publish(BedayaTopics.command, command, params: _params);
+      try {
+        await _client.publish(
+          BedayaTopics.command,
+          command,
+          params: _params,
+          deadline: deadline,
+        );
+      } on PublishDeadlineException catch (e) {
+        throw CommandTimeoutException(
+          'Device "$id": "${command.name}" (${command.id}) timed out after '
+          '$timeout: ${e.message}',
+          e,
+        );
+      }
+
+      final remaining = deadline.difference(DateTime.now());
       return await ack.future.timeout(
-        timeout,
+        remaining.isNegative ? Duration.zero : remaining,
         onTimeout: () => throw CommandTimeoutException(
           'Device "$id" did not answer "${command.name}" '
           '(${command.id}) within $timeout',
@@ -76,3 +103,7 @@ class Device {
     }
   }
 }
+
+/// Old name of [DeviceRemote].
+@Deprecated('Use DeviceRemote. Device will be removed in 0.3.0.')
+typedef Device = DeviceRemote;

@@ -13,3 +13,4 @@ CLAUDE.md
 # Local Mosquitto for integration tests (needs Docker), with generated
 # certificates and passwords.
 tool/
+.github/

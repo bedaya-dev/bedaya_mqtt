@@ -59,6 +59,7 @@ class ReconnectManager {
 
   final Random? _random;
   Timer? _timer;
+  Future<void>? _inFlight;
   bool _running = false;
   int _attempt = 0;
   Object? _lastError;
@@ -76,7 +77,15 @@ class ReconnectManager {
     _scheduleNext();
   }
 
+  /// Completes once no attempt is in flight. After [stop], an attempt that
+  /// was already connecting finishes (and is abandoned) before this
+  /// completes, so nothing reconnects behind the caller's back.
+  Future<void> get settled => _inFlight ?? Future<void>.value();
+
   /// Stops retrying, for example because the app called `disconnect()`.
+  ///
+  /// An attempt already connecting is not interrupted; await [settled] to
+  /// know it is over.
   void stop() {
     _running = false;
     _timer?.cancel();
@@ -96,7 +105,15 @@ class ReconnectManager {
     _timer = Timer(delay, _try);
   }
 
-  Future<void> _try() async {
+  Future<void> _try() {
+    final attempt = _attemptOnce();
+    _inFlight = attempt;
+    return attempt.whenComplete(() {
+      if (identical(_inFlight, attempt)) _inFlight = null;
+    });
+  }
+
+  Future<void> _attemptOnce() async {
     _timer = null;
     try {
       await connect();

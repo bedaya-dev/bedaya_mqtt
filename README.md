@@ -9,7 +9,8 @@ and adds the parts every IoT app ends up writing by hand:
 - **Automatic reconnect** with exponential backoff and jitter, and every
   subscription restored afterwards.
 - **Offline queue**: publish while offline, and messages are sent once the
-  connection is back.
+  connection is back. Per topic you choose queue, drop or fail, so stale
+  readings and late commands are never replayed.
 - **Typed topics**: `Topic<T>` with `{param}` patterns. You get `Telemetry`,
   not bytes.
 - **Two roles**: a *controller* that watches devices and sends commands, and
@@ -166,9 +167,30 @@ Use `ReconnectPolicy.never()` to turn it off.
 
 ## Offline queue
 
-While not connected, `publish` puts the message in a queue and returns.
-After the next connect, the client resubscribes, then sends the queue in
-order.
+While not connected, what `publish` does depends on the topic's
+`OfflinePolicy`:
+
+| Policy | While offline | Used by |
+|---|---|---|
+| `queue` (default) | Kept, and sent in order after the next connect (after resubscribing) | `commandAck`, your own topics |
+| `drop` | Thrown away; `publish` completes normally | `telemetry`, `status` |
+| `fail` | `publish` throws `ConnectionException` | `command` |
+
+Telemetry is dropped because a reading replayed after a reconnect looks
+current. Commands are never queued: `device.send()` waits for the
+connection only until its timeout, and a command that timed out is
+**never** sent later. Pick a policy for your own topics:
+
+```dart
+final alarm = Topic.json(
+  '{deviceId}/alarm',
+  fromJson: Alarm.fromJson,
+  toJson: (a) => a.toJson(),
+  offline: OfflinePolicy.queue, // an alarm should arrive, even late
+);
+```
+
+The queue itself:
 
 ```dart
 ClientConfig(
@@ -182,6 +204,32 @@ A dropped message is reported on `client.errors` as a
 `MessageDroppedException`. The default queue lives in memory. To keep
 messages across app restarts, implement `MessageQueue` and pass it as
 `BedayaClient(config, queue: myQueue)`.
+
+## Delivery guarantees
+
+Be precise about what "sent" means. There are three levels:
+
+1. **Handed to the socket.** For QoS 0, `publish` completes here. Nothing
+   confirms it arrived.
+2. **Broker confirmed (PUBACK / PUBCOMP).** For QoS 1 and 2, `publish`
+   completes only here. If the connection ends first, a `queue` topic's
+   message goes back into the offline queue and is sent again after the
+   reconnect: **at least once**, so it may arrive twice.
+3. **Device handled it.** Only the command ack tells you this:
+   `device.send()` returns once the device answered.
+
+A dead link with no TCP close (lost WiFi) is noticed after about two
+`keepAlive` periods, then the client reconnects.
+
+What this means in practice:
+
+- Devices should ignore a `Command.id` they have already handled.
+- A `CommandTimeoutException` means the outcome is **unknown**: the
+  command may have reached the device and only the ack was late. It is
+  never sent again after the timeout. Prefer commands that set a state
+  (`Command.relay(on: true)`) over ones that flip it.
+- The offline queue lives in memory by default, so it does not survive an
+  app restart. Implement `MessageQueue` to keep it on disk.
 
 ## TLS
 
@@ -290,7 +338,8 @@ Use `transport.drop()` to simulate a lost connection, and
 - Client ids must be unique. Two connections with the same id keep kicking
   each other off the broker. Leave `clientId` empty for a random one.
 - Sessions are clean: while a controller is offline, it misses messages
-  that devices send. The offline queue covers the *sender's* offline time.
+  that devices send. The offline queue covers the *sender's* offline time,
+  for topics with `OfflinePolicy.queue`.
 - A second stream on a topic that is already subscribed does not get the
   retained message again (brokers send it only on subscribe).
 

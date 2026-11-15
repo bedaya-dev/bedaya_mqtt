@@ -95,7 +95,23 @@ void main() {
   test('offline: queued, then sent after connecting', () async {
     final client = make();
     await client.publish(
-      BedayaTopics.telemetry,
+      BedayaTopics.commandAck, // OfflinePolicy.queue
+      CommandAck.success(Command('ping')),
+      params: {'deviceId': 'a1'},
+    );
+    await client.connect();
+
+    expect(
+      at(BedayaLogLevel.debug).first,
+      'offline: queued bedaya/a1/command/ack (1 waiting)',
+    );
+    expect(at(BedayaLogLevel.info), contains('sending 1 queued messages'));
+  });
+
+  test('offline: telemetry is dropped, and traced', () async {
+    final client = make();
+    await client.publish(
+      BedayaTopics.telemetry, // OfflinePolicy.drop
       const Telemetry({}),
       params: {'deviceId': 'a1'},
     );
@@ -103,9 +119,12 @@ void main() {
 
     expect(
       at(BedayaLogLevel.debug).first,
-      'offline: queued bedaya/a1/telemetry (1 waiting)',
+      'offline: dropped bedaya/a1/telemetry',
     );
-    expect(at(BedayaLogLevel.info), contains('sending 1 queued messages'));
+    expect(
+      at(BedayaLogLevel.info),
+      isNot(contains('sending 1 queued messages')),
+    );
   });
 
   test('a failed connect is an error, with its cause', () async {

@@ -57,6 +57,13 @@ abstract interface class MqttTransport {
 
   /// Sends [message] to the broker.
   ///
-  /// Throws a `ConnectionException` if not connected.
+  /// For QoS 0, completes once the message is sent. For QoS 1 and 2,
+  /// completes only when the broker has confirmed it, so a completed future
+  /// means the broker has the message.
+  ///
+  /// Throws a `ConnectionException` if not connected, or if the connection
+  /// ends before the broker confirms a QoS 1 or 2 message. The message may
+  /// still have reached the broker in that case (QoS 1 means "at least
+  /// once"), so sending it again can deliver it twice.
   Future<void> publish(RawMessage message);
 }
