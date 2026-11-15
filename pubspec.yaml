@@ -2,7 +2,7 @@ name: bedaya_mqtt
 description: >-
   Reliable MQTT for Flutter & Dart IoT apps. Auto reconnect, offline queue,
   typed topics, device and controller roles.
-version: 0.2.0
+version: 0.2.1
 repository: https://github.com/bedaya-dev/bedaya_mqtt
 issue_tracker: https://github.com/bedaya-dev/bedaya_mqtt/issues
 topics:
@@ -13,7 +13,7 @@ topics:
   - messaging
 
 environment:
-  sdk: ^3.13.2
+  sdk: ^3.8.0
 
 dependencies:
   mqtt_client: ^10.13.0

@@ -11,8 +11,9 @@ and adds the parts every IoT app ends up writing by hand:
 - **Offline queue**: publish while offline, and messages are sent once the
   connection is back. Per topic you choose queue, drop or fail, so stale
   readings and late commands are never replayed.
-- **Typed topics**: `Topic<T>` with `{param}` patterns. You get `Telemetry`,
-  not bytes.
+- **Typed topics**: `Topic<T>` with `{param}` patterns. You get a `T`, not
+  bytes. The built-in `Telemetry` is a flexible map of readings; define your
+  own topic when your data has a fixed shape.
 - **Two roles**: a *controller* that watches devices and sends commands, and
   a *device* that publishes data and answers them, with online/offline
   status and a Last Will.
@@ -34,7 +35,9 @@ dart pub add bedaya_mqtt
 These snippets use `broker.hivemq.com`, a free public broker that **everyone
 shares**. Pick your own `topicPrefix` (your name, or anything unique), and use
 the same one in the controller and the device. Otherwise you may see other
-people's devices, and they may switch your relay.
+people's devices, and they may switch your relay. A unique prefix only avoids
+collisions; it does not protect anything. Before connecting real hardware,
+read [Security](#security).
 
 ### Controller: watch a device and send it a command
 
@@ -82,7 +85,9 @@ await fan.publish(BedayaTopics.telemetry, Telemetry({'temp': 24.5}));
 
 The client publishes `online` when it connects and `offline` when it
 disconnects. If the connection dies, the broker publishes `offline` for it
-(the Last Will).
+(the Last Will). That takes a while: the broker waits 1.5 × `keepAlive`,
+about 45 seconds with the default of 30 seconds. Lower `keepAlive` to notice
+sooner, at the cost of more traffic.
 
 Runnable versions are in [`example/`](example/): `example.dart` runs both
 roles in one program, and `simulated_device.dart` + `controller.dart` run in
@@ -102,9 +107,15 @@ two terminals.
   timeout.
 - **Device ids with `/`, `+` or `#`.** They are MQTT topic levels and
   wildcards, so they are rejected. Use letters, digits, `-` and `_`.
-- **Expecting QoS 0 to survive a dropped connection.** It is "send and
-  forget". Use QoS 1 (the default for `Topic.json`) for anything that must
-  arrive. See [Delivery guarantees](#delivery-guarantees).
+- **Expecting every message to survive a dropped connection.** Two things
+  decide it: the QoS (0 is "send and forget") and the topic's
+  `OfflinePolicy` (`telemetry` and `status` are dropped while offline, on
+  purpose). For your own data that must arrive, use a topic with QoS 1 and
+  `OfflinePolicy.queue`, which is what `Topic.json` gives you by default.
+  See [Delivery guarantees](#delivery-guarantees).
+- **One client acting as several devices.** A client can be only one
+  device (`asDevice`), because the Last Will is per connection. A gateway
+  for several boards needs one client per board.
 
 ## Topics
 
@@ -264,6 +275,45 @@ A dropped message is reported on `client.errors` as a
 messages across app restarts, implement `MessageQueue` and pass it as
 `BedayaClient(config, queue: myQueue)`.
 
+## Security
+
+On a broker without logins, anyone who can reach it can read your devices
+and **send them commands**: a command is just a message on
+`{prefix}/{deviceId}/command`, and the prefix and ids are easy to guess or
+to read from your app. The public broker in the Quick start is for trying
+things out only.
+
+For real devices:
+
+- **Use your own broker with logins.** Every client sends a username and
+  password:
+
+  ```dart
+  ClientConfig(
+    host: 'mqtt.example.com',
+    useTls: true, // without TLS the password crosses the network in clear
+    username: 'living-room-fan',
+    password: fanPassword, // never hard-coded in an app you ship
+  )
+  ```
+
+- **Limit each login to its own topics** with the broker's access control.
+  With Mosquitto, an `acl_file` like this lets each device (logged in with
+  its device id as username) use only its own topics, and the app use all
+  of them (shown with the default prefix, `bedaya`):
+
+  ```text
+  pattern readwrite bedaya/%u/#
+
+  user app
+  topic readwrite bedaya/#
+  ```
+
+- **Use TLS** (next section), so logins and payloads can't be read or
+  changed on the way.
+- **Check commands on the device.** It should ignore names and params it
+  doesn't expect, and a `Command.id` it has already handled.
+
 ## TLS
 
 ```dart
@@ -337,11 +387,13 @@ through the files, and lists where to look for common problems.
 
 | Where | What |
 |---|---|
-| `connect()` | `ConnectionException`: broker unreachable, or refused (for example `notAuthorized`) |
-| `device.send()` | `CommandTimeoutException` when no ack arrives in time (10s by default) |
+| `connect()` | `ConnectionException`: broker unreachable, or refused (for example `notAuthorized`), or `disconnect()` was called before it finished |
+| `publish()` | `ConnectionException` while offline, for a topic with `OfflinePolicy.fail` or with the queue turned off (`maxQueueSize: 0`). `PublishDeadlineException` when a `deadline` passes. `ArgumentError` for a missing or invalid param |
+| `send()` | `CommandTimeoutException` when the command could not be sent, or no ack arrived, within its timeout (10s by default). The outcome is then unknown, see [Delivery guarantees](#delivery-guarantees) |
 | `client.errors` | `DecodeException` for payloads that don't decode, `MessageDroppedException` when the queue is full |
 
-Every exception extends `BedayaException`.
+Every exception from the package extends `BedayaException`, except
+`ArgumentError`, which means a mistake in the calling code.
 
 ## Testing your code
 
@@ -353,18 +405,21 @@ import 'package:bedaya_mqtt/bedaya_mqtt.dart';
 import 'package:bedaya_mqtt/testing.dart';
 
 final broker = MemoryBroker();
+final deviceTransport = MemoryTransport(broker);
 final device = BedayaClient(
   ClientConfig(host: 'memory'),
-  transport: MemoryTransport(broker),
+  transport: deviceTransport,
 );
 final controller = BedayaClient(
   ClientConfig(host: 'memory'),
   transport: MemoryTransport(broker),
 );
-```
 
-Use `transport.drop()` to simulate a lost connection, and
-`broker.stop()` / `broker.start()` to simulate the broker going down.
+// Later, in a test:
+deviceTransport.drop(); // the device loses its network (Last Will sent)
+broker.stop();          // the broker goes down for everyone
+broker.start();
+```
 
 ## Good to know
 

@@ -7,11 +7,17 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lowest SDK pubspec.yaml allows, and the newest.
+        sdk: ['3.8.0', stable]
+    name: unit (Dart ${{ matrix.sdk }})
     steps:
       - uses: actions/checkout@v4
       - uses: dart-lang/setup-dart@v1
         with:
-          sdk: stable
+          sdk: ${{ matrix.sdk }}
       - run: dart pub get
       - name: Unit tests (no network)
         run: dart test --reporter expanded $(ls -d test/*/ | grep -v integration)

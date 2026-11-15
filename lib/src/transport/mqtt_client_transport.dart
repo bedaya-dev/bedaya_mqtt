@@ -25,8 +25,10 @@ import 'topic_filter.dart';
 class MqttClientTransport implements MqttTransport {
   /// Wraps [_client], which must already have its server, port, client id
   /// and TLS settings. `createTransport` builds one from `ClientConfig`.
-  /// [_username] and [_password] are sent when connecting.
-  MqttClientTransport(this._client, {this._username, this._password}) {
+  /// [username] and [password] are sent when connecting.
+  MqttClientTransport(this._client, {String? username, String? password})
+    : _username = username,
+      _password = password {
     _client
       ..logging(on: false)
       // mqtt_client defaults to MQTT 3.1, where it sends UNSUBSCRIBE with

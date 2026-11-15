@@ -1,3 +1,13 @@
+## 0.2.1
+
+- Works with Dart 3.8 and later (was 3.13), so Flutter projects on older
+  SDKs can use it. CI now runs the tests on Dart 3.8.0 too.
+- README: new Security section (logins, a Mosquitto ACL per device, TLS,
+  checking commands on the device); the Errors table covers `publish()`
+  and `send()` fully; the Last Will delay; one device per client; a
+  complete testing example.
+- No behavior changes.
+
 ## 0.2.0
 
 Reliability on bad networks. Read the "Behavior changes" first: three of
