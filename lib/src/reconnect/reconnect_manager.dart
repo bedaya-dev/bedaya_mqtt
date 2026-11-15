@@ -31,8 +31,8 @@ class ReconnectManager {
     required this.onReconnected,
     required this.onGaveUp,
     this.onAttemptFailed,
-    this._random,
-  });
+    Random? random,
+  }) : _random = random;
 
   /// How long to wait between attempts, and when to give up.
   final ReconnectPolicy policy;
