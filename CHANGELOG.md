@@ -1,5 +1,11 @@
-## Unreleased
+## 0.2.2
 
+- **Clearing a retained topic is no longer an error.** An empty payload on
+  a retained topic (the MQTT way to clear it, for example the `status` of
+  a removed device) used to be reported as a `DecodeException`. It is now
+  skipped quietly. On other topics an empty payload is still reported.
+- README: a diagram of how a reading travels; `homepage` set to
+  bedaya.dev; `doc/` is no longer shipped in the package.
 - **Refused subscriptions are reported.** If the broker refuses a
   subscription (answers with SUBACK 0x80), a new `SubscriptionException`
   goes to `client.errors`, with the filter, the reason, and the `context`:
@@ -12,16 +18,28 @@
   reconnect, commands wait until every restored subscription is confirmed
   or refused, not just requested. The restore sends all requests at once
   and then waits, instead of one round trip per subscription.
+- **`send()` waits for its ack subscription.** Fixed a race: a command
+  could go out before the broker had confirmed the subscription to its
+  ack topic, so a fast ack could be missed. Now `send()` waits for that
+  SUBACK first. If the broker refuses it, `send()` throws
+  `SubscriptionException` at once and the command is not sent. The ack
+  subscription is kept per device after the first command (until
+  `close()`), so later commands don't wait for it again.
+- `SubscriptionException` docs: how to tell a refusal (`reason`
+  "rejected by the broker") from a request that could not be sent
+  (`cause` set). `client.errors` docs list it.
+- Tests: a raw MQTT stub server checks that a real SUBACK 0x80 reaches
+  `MqttClientTransport` and `client.errors` (no Docker needed).
 - `MqttTransport.subscribe` now completes on the broker's answer and
   throws `SubscriptionException` on a refusal. Custom transports should
   do the same.
 - Testing: `MemoryBroker.rejectSubscription` refuses chosen filters, like
   an ACL.
-- 0.2.0 was tagged in git but never published on pub.dev; 0.2.1 contains
-  everything listed under it.
 
 ## 0.2.1
 
+- 0.2.0 was tagged in git but never published on pub.dev; 0.2.1 contains
+  everything listed under it.
 - Works with Dart 3.8 and later (was 3.13), so Flutter projects on older
   SDKs can use it. CI now runs the tests on Dart 3.8.0 too.
 - README: new Security section (logins, a Mosquitto ACL per device, TLS,

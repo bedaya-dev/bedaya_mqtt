@@ -144,6 +144,18 @@ class BedayaClient {
   /// [disconnect], so its "offline" can never go out before that "online".
   Future<void> _ready = Future<void>.value();
 
+  /// The broker's answer to each subscription on the current connection,
+  /// by full filter: completes on SUBACK, throws a [SubscriptionException]
+  /// (with its context) on a refusal and a [ConnectionException] if the
+  /// connection ends first. Set when the request goes out, cleared on
+  /// every connect and when the last listener of a filter leaves. Commands
+  /// wait here for their ack subscription ([_publishBefore]).
+  final Map<String, Future<void>> _confirmations = {};
+
+  /// Run by [close], for state other parts keep per client (see
+  /// [onClientClose]).
+  final List<Future<void> Function()> _closeCallbacks = [];
+
   /// The [connect] in progress, shared by every caller until it ends.
   Future<void>? _connecting;
 
@@ -167,7 +179,12 @@ class BedayaClient {
   /// - [DecodeException]: a payload that could not be decoded. The message
   ///   is skipped, and your stream keeps going.
   /// - [MessageDroppedException]: the offline queue was full.
-  /// - [ConnectionException]: a subscribe or unsubscribe that failed.
+  /// - [SubscriptionException]: the broker answered a subscription with a
+  ///   failure code (SUBACK 0x80), or the request could not be sent. The
+  ///   stream gets nothing; it never gets an error event. Its `context`
+  ///   says when: first connect, reconnect, or a new listener.
+  /// - [ConnectionException]: a subscribe or unsubscribe that failed for
+  ///   another reason.
   ///
   /// Bad messages are skipped instead of breaking your streams, because
   /// anyone on a shared broker can publish to your topics.
@@ -289,6 +306,8 @@ class BedayaClient {
   Future<void> _onConnected() async {
     final ready = Completer<void>();
     _ready = ready.future;
+    // A new connection: answers from the old one say nothing about it.
+    _confirmations.clear();
     _log(BedayaLogLevel.info, 'connected');
     _setState(const Connected());
     try {
@@ -447,6 +466,10 @@ class BedayaClient {
 
   /// Disconnects and closes every stream. The client can't be used after.
   Future<void> close() async {
+    for (final callback in _closeCallbacks) {
+      await callback();
+    }
+    _closeCallbacks.clear();
     await _devices?.close();
     await disconnect();
     await _traceIncoming?.cancel();
@@ -657,12 +680,29 @@ class BedayaClient {
   /// are back before the message goes out. Otherwise a fast answer, like a
   /// command ack, could arrive before we listen again. It does not wait for
   /// the offline queue to be sent.
-  Future<void> _publishBefore(RawMessage message, DateTime deadline) async {
+  ///
+  /// With [afterSubscribed] (a full filter that is being listened to), it
+  /// also waits until the broker has confirmed that subscription on the
+  /// current connection, so the answer can't be missed. If the broker
+  /// refuses it, this throws that [SubscriptionException] and the message
+  /// is not sent.
+  Future<void> _publishBefore(
+    RawMessage message,
+    DateTime deadline, {
+    String? afterSubscribed,
+  }) async {
     while (true) {
       if (_state is Connected) {
         await _ready;
-        final left = deadline.difference(DateTime.now());
-        if (_state is Connected && left > Duration.zero) {
+        var left = deadline.difference(DateTime.now());
+        var subscribed = true;
+        if (afterSubscribed != null &&
+            _state is Connected &&
+            left > Duration.zero) {
+          subscribed = await _confirmed(afterSubscribed, message, left);
+          left = deadline.difference(DateTime.now());
+        }
+        if (subscribed && _state is Connected && left > Duration.zero) {
           _log(
             BedayaLogLevel.debug,
             'publish ${message.topic} ${_preview(message.payload)}',
@@ -719,6 +759,42 @@ class BedayaClient {
     );
   }
 
+  /// Waits for the broker's answer to the subscription of [filter] on the
+  /// current connection, for at most [left]. True once confirmed (or if
+  /// there is nothing to wait for), false if the connection ended first.
+  /// Throws the [SubscriptionException] if the broker refused it, and a
+  /// [PublishDeadlineException] (nothing sent) if [left] runs out.
+  Future<bool> _confirmed(
+    String filter,
+    RawMessage message,
+    Duration left,
+  ) async {
+    final answer = _confirmations[filter];
+    if (answer == null) return true;
+    try {
+      await answer.timeout(left);
+      return true;
+    } on ConnectionException {
+      // This answer belongs to a connection that is gone. Forget it, so
+      // the loop can't spin on it before the state catches up; the
+      // reconnect asks again.
+      if (identical(_confirmations[filter], answer)) {
+        _confirmations.remove(filter);
+      }
+      return false;
+    } on TimeoutException {
+      _log(
+        BedayaLogLevel.warning,
+        'subscription to $filter not confirmed before the deadline of '
+        '${message.topic}',
+      );
+      throw PublishDeadlineException(
+        'The broker did not confirm the subscription to $filter before the '
+        'deadline; ${message.topic} was not sent and will not be sent later',
+      );
+    }
+  }
+
   /// Listens to [topic]. Params in [params] are fixed; the others match
   /// anything.
   ///
@@ -733,7 +809,9 @@ class BedayaClient {
   ///
   /// The subscription starts when the stream is listened to (even before
   /// [connect]) and ends when it is cancelled. Messages that fail to
-  /// decode are skipped and reported on [errors].
+  /// decode are skipped and reported on [errors]. An empty payload on a
+  /// retained topic means the retained message was cleared: it is skipped
+  /// without an error.
   ///
   /// If the broker answers the subscription with a failure code (some
   /// brokers do for an ACL refusal; Mosquitto doesn't), a
@@ -756,6 +834,15 @@ class BedayaClient {
       if (matched == null) return;
       for (final MapEntry(:key, :value) in params.entries) {
         if (matched[key] != value) return;
+      }
+
+      // An empty payload on a retained topic is the MQTT way to clear it
+      // (a device removed, for example), not a bad message. Brokers send
+      // it to current subscribers with retained = false, so check the
+      // topic too.
+      if (raw.payload.isEmpty && (raw.retained || topic.retained)) {
+        _log(BedayaLogLevel.debug, 'cleared ${raw.topic} (empty payload)');
+        return;
       }
 
       final T value;
@@ -811,23 +898,43 @@ class BedayaClient {
   /// on [errors] as a [SubscriptionException] and does not throw: the
   /// filter stays registered, so the next reconnect asks again. Anything
   /// else (the connection dropped) is thrown.
+  ///
+  /// The answer is also kept in [_confirmations] for commands. The request
+  /// goes out, and the answer is kept, before the first `await`.
   Future<void> _subscribe(
     String filter,
     Qos qos,
     SubscriptionContext context,
   ) async {
     _log(BedayaLogLevel.debug, 'subscribe $filter (${qos.name})');
+    final answer = _askBroker(filter, qos, context);
+    _confirmations[filter] = answer;
+    try {
+      await answer;
+    } on SubscriptionException catch (e) {
+      _error(e);
+    }
+  }
+
+  /// The transport's subscribe, with [context] added to a refusal.
+  Future<void> _askBroker(
+    String filter,
+    Qos qos,
+    SubscriptionContext context,
+  ) async {
     try {
       await _transport.subscribe(filter, qos);
     } on SubscriptionException catch (e) {
-      _error(e.withContext(context));
+      throw e.withContext(context);
     }
   }
 
   /// A stream stopped listening to [filter]. Unsubscribes if it was the
   /// last one.
   void _removeListener(String filter) {
-    if (_registry.remove(filter) && _state is Connected) {
+    final last = _registry.remove(filter);
+    if (last) _confirmations.remove(filter);
+    if (last && _state is Connected) {
       _log(BedayaLogLevel.debug, 'unsubscribe $filter');
       _transport
           .unsubscribe(filter)
@@ -947,3 +1054,34 @@ class BedayaClient {
   static void _checkDeviceId(String id) =>
       BedayaTopics.status.pattern.resolve({'deviceId': id});
 }
+
+// ----------------------------------------------------------------------
+// Package-internal hooks
+// ----------------------------------------------------------------------
+//
+// Used by `DeviceRemote` (another library), and hidden from the public API
+// by the `hide` in `lib/bedaya_mqtt.dart`.
+
+/// Publishes a command with a [deadline], like [BedayaClient.publish], but
+/// only once the broker has confirmed the subscription to [ackTopic]
+/// (with [params]) on the current connection. Someone must already be
+/// listening to that topic.
+///
+/// Throws the [SubscriptionException] if the broker refused it; the
+/// command is then not sent.
+Future<void> publishAfterSubscribed<T, A>(
+  BedayaClient client,
+  Topic<T> topic,
+  T value, {
+  required Topic<A> ackTopic,
+  required Map<String, String> params,
+  required DateTime deadline,
+}) => client._publishBefore(
+  client._encode(topic, value, params),
+  deadline,
+  afterSubscribed: client._addPrefix(ackTopic.pattern.filter(params)),
+);
+
+/// Runs [callback] when [client] is closed, before its streams close.
+void onClientClose(BedayaClient client, Future<void> Function() callback) =>
+    client._closeCallbacks.add(callback);

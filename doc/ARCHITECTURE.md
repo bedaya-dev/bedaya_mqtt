@@ -263,10 +263,19 @@ Receiving (for each message from the broker):
 
 Controller: `await client.device('a1').send(Command.relay(on: true))`
 
-1. `DeviceRemote.send` (`device/device.dart`) first listens on
-   `bedaya/a1/command/ack` (so a fast answer is not missed).
+1. `DeviceRemote.send` (`device/device.dart`) first makes sure someone
+   listens on `bedaya/a1/command/ack` (so a fast answer is not missed):
+   `_AckListener.of(client, 'a1')`, one per client and device, made on the
+   first command and kept until `close()` (`onClientClose`). It routes each
+   ack to the waiting command by id.
 2. Publishes the command on `bedaya/a1/command` with a deadline of now +
-   `timeout` (Flow 2, step 2). It carries a random `id`. It is never put in
+   `timeout` (Flow 2, step 2), through `publishAfterSubscribed`: after
+   `_ready`, it also waits for the ack filter's answer in
+   `BedayaClient._confirmations` (the SUBACK on the current connection).
+   A refusal throws that `SubscriptionException` and nothing is sent; a
+   dropped connection goes back to waiting for the reconnect. (Both
+   hooks live in `bedaya_client.dart` and are hidden from the public
+   export.) It carries a random `id`. It is never put in
    the offline queue: if the client is offline it waits for the
    connection, and if the deadline passes first it throws
    `CommandTimeoutException`. A command that timed out is never sent
@@ -276,7 +285,7 @@ Controller: `await client.device('a1').send(Command.relay(on: true))`
    topic.
 4. `DeviceRemote.send` gets an ack with the same id → returns it. No ack
    before the deadline → `CommandTimeoutException`. Either way it stops
-   listening.
+   waiting for that id; the ack subscription stays for the next command.
 
 ## Flow 7: all devices (DeviceRegistry)
 

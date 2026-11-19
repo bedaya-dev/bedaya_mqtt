@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../client/bedaya_client.dart';
+import '../client/topic_message.dart';
 import '../contract/bedaya_topics.dart';
 import '../contract/messages/command.dart';
 import '../contract/messages/command_ack.dart';
@@ -17,8 +18,10 @@ import '../topic/topic.dart';
 /// final ack = await deviceRemote.send(Command.relay(on: true));
 /// ```
 ///
-/// It is cheap to create and holds no subscriptions by itself: each stream
-/// subscribes when you listen and unsubscribes when you cancel.
+/// It is cheap to create: each stream subscribes when you listen and
+/// unsubscribes when you cancel. The one exception is the ack subscription
+/// of [send], which the client keeps per device after the first command
+/// (see [send]).
 class DeviceRemote {
   /// Use `client.device(id)` instead.
   DeviceRemote(this._client, this.id);
@@ -43,9 +46,18 @@ class DeviceRemote {
 
   /// Sends [command] and waits for the device's ack.
   ///
-  /// Step by step: listen on `{deviceId}/command/ack`, publish the command
-  /// on `{deviceId}/command`, wait for an ack with the same id, stop
-  /// listening.
+  /// Step by step: listen on `{deviceId}/command/ack`, wait until the
+  /// broker has confirmed that subscription (SUBACK), publish the command
+  /// on `{deviceId}/command`, wait for an ack with the same id.
+  ///
+  /// The ack subscription is made on the first command to this device and
+  /// then kept until the client is closed, so later commands don't wait for
+  /// it again. After a reconnect, a command waits until it is restored.
+  ///
+  /// If the broker refuses the ack subscription (SUBACK 0x80), this throws
+  /// that [SubscriptionException] at once and the command is **not** sent,
+  /// since its ack could never arrive. (Mosquitto accepts a subscription
+  /// its ACL refuses, so there the command goes out and times out.)
   ///
   /// [timeout] covers the whole round trip: waiting for the connection,
   /// the broker's confirmation, and the device's ack. If the client is
@@ -61,24 +73,25 @@ class DeviceRemote {
   ///
   /// Returns the ack even if it says the command failed; check
   /// [CommandAck.ok]. Throws a [CommandTimeoutException] if the command
-  /// could not be sent, or no ack arrived, within [timeout], and a
-  /// [ConnectionException] if the client is closed meanwhile.
+  /// could not be sent, or no ack arrived, within [timeout], a
+  /// [SubscriptionException] if the broker refused the ack subscription,
+  /// and a [ConnectionException] if the client is closed meanwhile.
   Future<CommandAck> send(
     Command command, {
     Duration timeout = const Duration(seconds: 10),
   }) async {
     final deadline = DateTime.now().add(timeout);
-    final ack = Completer<CommandAck>();
     // Listen before publishing, so a fast answer is not missed.
-    final acks = on(BedayaTopics.commandAck).listen((a) {
-      if (a.commandId == command.id && !ack.isCompleted) ack.complete(a);
-    });
+    final acks = _AckListener.of(_client, id);
+    final ack = acks.expect(command.id);
 
     try {
       try {
-        await _client.publish(
+        await publishAfterSubscribed(
+          _client,
           BedayaTopics.command,
           command,
+          ackTopic: BedayaTopics.commandAck,
           params: _params,
           deadline: deadline,
         );
@@ -91,7 +104,7 @@ class DeviceRemote {
       }
 
       final remaining = deadline.difference(DateTime.now());
-      return await ack.future.timeout(
+      return await ack.timeout(
         remaining.isNegative ? Duration.zero : remaining,
         onTimeout: () => throw CommandTimeoutException(
           'Device "$id" did not answer "${command.name}" '
@@ -99,9 +112,50 @@ class DeviceRemote {
         ),
       );
     } finally {
-      await acks.cancel();
+      acks.forget(command.id);
     }
   }
+}
+
+/// The ack subscription of one device on one client, shared by every
+/// command sent to it. Made on the first command and kept until the client
+/// is closed, so the next command doesn't wait for another SUBACK.
+class _AckListener {
+  _AckListener(BedayaClient client, String deviceId) {
+    _acks = client
+        .subscribe(BedayaTopics.commandAck, params: {'deviceId': deviceId})
+        .listen((m) => _waiting.remove(m.value.commandId)?.complete(m.value));
+  }
+
+  /// One per client and device id.
+  static final _all = Expando<Map<String, _AckListener>>();
+
+  static _AckListener of(BedayaClient client, String deviceId) {
+    var byDevice = _all[client];
+    if (byDevice == null) {
+      final created = byDevice = {};
+      _all[client] = created;
+      onClientClose(client, () async {
+        _all[client] = null;
+        for (final listener in created.values) {
+          await listener._acks.cancel();
+        }
+      });
+    }
+    return byDevice[deviceId] ??= _AckListener(client, deviceId);
+  }
+
+  late final StreamSubscription<TopicMessage<CommandAck>> _acks;
+
+  /// The commands waiting for their ack, by command id.
+  final Map<String, Completer<CommandAck>> _waiting = {};
+
+  /// Starts waiting for the ack of [commandId].
+  Future<CommandAck> expect(String commandId) =>
+      (_waiting[commandId] = Completer<CommandAck>()).future;
+
+  /// Stops waiting for [commandId] (answered, timed out or failed).
+  void forget(String commandId) => _waiting.remove(commandId);
 }
 
 /// Old name of [DeviceRemote].
