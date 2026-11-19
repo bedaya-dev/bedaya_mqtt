@@ -14,3 +14,6 @@ CLAUDE.md
 # certificates and passwords.
 tool/
 .github/
+
+# Repository docs and images (the README links to them on GitHub).
+doc/

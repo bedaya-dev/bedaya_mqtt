@@ -809,7 +809,9 @@ class BedayaClient {
   ///
   /// The subscription starts when the stream is listened to (even before
   /// [connect]) and ends when it is cancelled. Messages that fail to
-  /// decode are skipped and reported on [errors].
+  /// decode are skipped and reported on [errors]. An empty payload on a
+  /// retained topic means the retained message was cleared: it is skipped
+  /// without an error.
   ///
   /// If the broker answers the subscription with a failure code (some
   /// brokers do for an ACL refusal; Mosquitto doesn't), a
@@ -832,6 +834,15 @@ class BedayaClient {
       if (matched == null) return;
       for (final MapEntry(:key, :value) in params.entries) {
         if (matched[key] != value) return;
+      }
+
+      // An empty payload on a retained topic is the MQTT way to clear it
+      // (a device removed, for example), not a bad message. Brokers send
+      // it to current subscribers with retained = false, so check the
+      // topic too.
+      if (raw.payload.isEmpty && (raw.retained || topic.retained)) {
+        _log(BedayaLogLevel.debug, 'cleared ${raw.topic} (empty payload)');
+        return;
       }
 
       final T value;

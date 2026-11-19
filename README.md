@@ -3,6 +3,8 @@
 Typed, reliable MQTT for Dart: reconnect, offline queue, typed topics.
 Built by Bedaya.
 
+![How a reading travels from a device, through the broker, to a Flutter app](https://raw.githubusercontent.com/bedaya-dev/bedaya_mqtt/main/doc/images/flow-readme.gif)
+
 `bedaya_mqtt` sits on top of [`mqtt_client`](https://pub.dev/packages/mqtt_client)
 and adds the parts every IoT app ends up writing by hand:
 
